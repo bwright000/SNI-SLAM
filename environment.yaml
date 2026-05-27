@@ -210,4 +210,9 @@ dependencies:
     - widgetsnbextension==3.6.0
     - zipp==3.7.0
     - wandb
-    - timm
+    # timm is required only by the downloaded DINOv2 backbone (facebookresearch/dinov2
+    # pins timm==0.9.2). Left unpinned it resolves to 0.9.12, which pulls an unbounded
+    # safetensors → pip picks 0.5.3 (no Python 3.7 wheel) → Rust source build → fail.
+    # Pin to DINOv2's version and to the last safetensors series that ships cp37 wheels.
+    - timm==0.9.2
+    - safetensors==0.3.3

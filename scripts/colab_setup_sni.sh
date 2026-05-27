@@ -142,34 +142,85 @@ if [ -d "$DRIVE_DATA_DIR/replica" ] && [ -f "$DRIVE_DATA_DIR/seg/dinov2_replica.
   cp -r "$DRIVE_DATA_DIR/replica/"* "$DATA_TARGET/" 2>/dev/null || true
   cp -r "$DRIVE_DATA_DIR/seg/"*     "$SEG_TARGET/"  2>/dev/null || true
 else
-  echo "  downloading from Google Drive (folder $GDRIVE_FOLDER_ID)..."
+  # `gdown --folder` is unreliable here: it aborts the whole transfer if any
+  # single file hits Google's download-quota ("had many accesses"), which the
+  # popular dinov2_replica.pth does. Download each file by its individual ID
+  # instead — folder mode is more rate-limited than direct file fetch.
+  # File IDs captured 2026-05-20 from folder $GDRIVE_FOLDER_ID. The authors'
+  # subset is room_0 + room_1 only.
+  echo "  downloading individual files by ID..."
   pip install -q gdown
   STAGING=/content/sni_download
-  mkdir -p "$STAGING"
-  gdown --folder "$GDRIVE_FOLDER_ID" -O "$STAGING" --remaining-ok || {
-    echo "  ERROR: gdown failed. The Drive folder may have a download quota or "
-    echo "         require manual login. Open it in a browser and copy files into:"
-    echo "         $DRIVE_DATA_DIR"
-    exit 1
-  }
+  mkdir -p "$STAGING/seg"
+
+  # seg/ artifacts
+  gdown 1ffPsH3NWK8GqoeSXDTGWo-QfC-LbhYvU -O "$STAGING/seg/dinov2_replica.pth"            || echo "  WARN dinov2_replica.pth failed (quota?) — see manual-copy note below"
+  gdown 12QnXVswA1yiet-zmhzkLNsjCpboOLQBS -O "$STAGING/seg/facebookresearch_dinov2_main.zip" || true
+  gdown 1A-pm0LWQZzevNdMZ14EP0z_b83t2-JuF -O "$STAGING/seg/num_semantic_class.pkl"        || true
+  gdown 1gRbgMobHhZCa63dcOSGpjKK7UUVK6vcW -O "$STAGING/seg/semantic_classes.pkl"          || true
+
+  # Replica scene zips (the distributed subset)
+  gdown 1cDpqqb49V_SpU4seSTHc2CQegUAi1Af7 -O "$STAGING/room_0.zip" || true
+  gdown 16WI3WNtP0-dLw8maHOYwiZhgYQL5eNGw -O "$STAGING/room_1.zip" || true
+
+  # Google Drive enforces a per-file daily download quota that blocks gdown on
+  # the large/popular files (dinov2_replica.pth, room_0.zip, room_1.zip) with
+  # "Cannot retrieve the public link... had many accesses". gdown cannot bypass
+  # it. Fallback: look on the user's own My Drive for a manually-made copy
+  # (Make a copy → fresh ID → no quota), and use that instead.
+  declare -A QUOTA_FALLBACK=(
+    ["$STAGING/seg/dinov2_replica.pth"]="*dinov2_replica*.pth"
+    ["$STAGING/room_0.zip"]="*room_0*.zip"
+    ["$STAGING/room_1.zip"]="*room_1*.zip"
+  )
+  for dest in "${!QUOTA_FALLBACK[@]}"; do
+    if [ ! -s "$dest" ]; then
+      pat="${QUOTA_FALLBACK[$dest]}"
+      hit=$(find /content/drive/MyDrive -maxdepth 3 -iname "$pat" 2>/dev/null | head -1)
+      if [ -n "$hit" ]; then
+        echo "  quota fallback: $(basename "$dest") <- $hit"
+        cp "$hit" "$dest"
+      else
+        echo "  MISSING $(basename "$dest") — gdown quota-blocked and no My Drive copy found."
+        echo "    Make a copy of it into My Drive, then re-run. (see README note)"
+      fi
+    fi
+  done
+
   echo "  inventory of $STAGING:"
-  ls -la "$STAGING"
-  # Try to auto-organise: the Google Drive layout typically has:
-  #   replica/<scene>/{rgb,depth,semantic_class,traj.txt}
-  #   seg/dinov2_replica.pth
-  #   seg/facebookresearch_dinov2_main.zip
-  if [ -d "$STAGING/replica" ]; then
-    cp -rv "$STAGING/replica/"* "$DATA_TARGET/" || true
-  fi
-  if [ -d "$STAGING/seg" ]; then
-    cp -rv "$STAGING/seg/"* "$SEG_TARGET/" || true
-  fi
-  # Unzip DINOv2 backbone if zipped
+  ls -la "$STAGING" "$STAGING/seg"
+
+  # Organise seg artifacts
+  cp -v "$STAGING/seg/"* "$SEG_TARGET/" 2>/dev/null || true
   if [ -f "$SEG_TARGET/facebookresearch_dinov2_main.zip" ] && \
      [ ! -d "$SEG_TARGET/facebookresearch_dinov2_main" ]; then
     echo "  unzipping facebookresearch_dinov2_main.zip..."
     (cd "$SEG_TARGET" && unzip -q facebookresearch_dinov2_main.zip)
   fi
+
+  # Unzip Replica scene zips into data/replica/. The zip's internal folder is
+  # 'room_0' / 'room_1' (matching the config's data/replica/room_0 path).
+  for z in "$STAGING"/room_*.zip; do
+    [ -f "$z" ] || continue
+    echo "  unzipping $(basename "$z") into $DATA_TARGET ..."
+    unzip -q -o "$z" -d "$DATA_TARGET"
+  done
+
+  # If dinov2 weight failed via gdown, fall back to a copy already on Drive
+  if [ ! -s "$SEG_TARGET/dinov2_replica.pth" ]; then
+    echo "  dinov2_replica.pth missing — searching Drive for a manual copy..."
+    HIT=$(find /content/drive/MyDrive -name "*dinov2_replica*.pth" 2>/dev/null | head -1)
+    if [ -n "$HIT" ]; then
+      echo "    found $HIT — copying"
+      cp "$HIT" "$SEG_TARGET/dinov2_replica.pth"
+    else
+      echo "    NOT found. Manual step required:"
+      echo "      1. Open https://drive.google.com/uc?id=1ffPsH3NWK8GqoeSXDTGWo-QfC-LbhYvU"
+      echo "      2. 'Make a copy' into your My Drive (your copy has no quota)"
+      echo "      3. Re-run this script, or cp the copy into $SEG_TARGET/dinov2_replica.pth"
+    fi
+  fi
+
   # Mirror to Drive cache for next session
   echo "  caching downloaded data to $DRIVE_DATA_DIR..."
   mkdir -p "$DRIVE_DATA_DIR/replica" "$DRIVE_DATA_DIR/seg"

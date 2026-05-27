@@ -25,10 +25,11 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Default subset chosen for spread across room/office families.
-# Override with SCENES env var if the Google Drive subset has different
-# scenes available (the README says "subset" — confirm via ls before running).
-SCENES_DEFAULT="room0 room1 office0 office1"
+# The SNI-SLAM authors' Google Drive only distributes a 2-scene subset:
+# room_0.zip + room_1.zip (confirmed 2026-05-20). office0-4 / room2 require
+# the data_generation/ Habitat-Sim pipeline to regenerate. Default to the
+# two available scenes; override with SCENES if you regenerate more.
+SCENES_DEFAULT="room0 room1"
 SCENES=${SCENES:-$SCENES_DEFAULT}
 
 DRIVE_OUT=/content/drive/MyDrive/Outputs/sni_slam_replica

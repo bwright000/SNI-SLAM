@@ -68,6 +68,15 @@ fi
 source $CONDA_PREFIX_PATH/etc/profile.d/conda.sh
 conda --version
 
+# Accept Anaconda channel Terms of Service. The environment.yaml uses the
+# 'defaults' channel which maps to repo.anaconda.com/pkgs/{main,r}; recent
+# conda refuses non-interactive installs from these until ToS is accepted.
+# Idempotent — re-accepting is a no-op. '|| true' so older conda versions
+# without the 'tos' subcommand don't abort the script.
+echo "  accepting Anaconda channel ToS (pkgs/main, pkgs/r)..."
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r    2>/dev/null || true
+
 # ---------------------------------------------------------------------
 # 4. Restore or build the 'sni' env
 # ---------------------------------------------------------------------

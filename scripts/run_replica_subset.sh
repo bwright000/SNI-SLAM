@@ -45,6 +45,19 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$MASTER_LOG"
 }
 
+# Authoritative "this scene actually finished" check.
+# SNI-SLAM only writes the culled final mesh at the very last frame
+# (Mapper.py: idx == n_img-1 -> final_mesh_color.ply -> cull_mesh ->
+# final_mesh_color_culled.ply), which is also the file eval_recon.py reads.
+# A run that dies mid-sequence (e.g. the frame-19 system-RAM OOM that SIGKILLs
+# the mapper) never produces it. rc==0 alone is NOT trustworthy: the mapper can
+# be killed while the parent process still exits 0, which previously left an
+# empty output mislabeled DONE in ~4 minutes. Gate everything on this instead.
+scene_complete() {
+  local m="$1/mesh/final_mesh_color_culled.ply"
+  [ -f "$m" ] && [ "$(stat -c%s "$m" 2>/dev/null || echo 0)" -gt 10000 ]
+}
+
 # Pre-flight: verify the scenes we want actually exist in data/replica/
 log "=== Replica subset sweep starting ==="
 log "Scenes requested:  $SCENES"
@@ -79,14 +92,17 @@ for s in $ACTUAL_SCENES; do
   fi
 
   DRIVE_SCENE_OUT=$DRIVE_OUT/$s
-  if [ -d "$DRIVE_SCENE_OUT" ] && [ "$(ls -A "$DRIVE_SCENE_OUT" 2>/dev/null)" ]; then
-    log "SKIP  $s SLAM (already on Drive at $DRIVE_SCENE_OUT)"
+  if scene_complete "$DRIVE_SCENE_OUT"; then
+    log "SKIP  $s SLAM (complete on Drive — culled final mesh present)"
     # Make sure local output is in place for eval
     if [ ! -d "output/Replica/$s" ]; then
       mkdir -p "output/Replica/$s"
       cp -r "$DRIVE_SCENE_OUT/"* "output/Replica/$s/" 2>/dev/null || true
     fi
   else
+    if [ -d "$DRIVE_SCENE_OUT" ] && [ "$(ls -A "$DRIVE_SCENE_OUT" 2>/dev/null)" ]; then
+      log "REDO  $s — Drive output exists but is INCOMPLETE (no culled final mesh); re-running from scratch"
+    fi
     log "START $s"
     t0=$(date +%s)
     python -W ignore run.py "$CFG" >> "$MASTER_LOG" 2>&1
@@ -94,13 +110,14 @@ for s in $ACTUAL_SCENES; do
     elapsed=$(( $(date +%s) - t0 ))
     h=$(( elapsed / 3600 ))
     m=$(( (elapsed % 3600) / 60 ))
-    if [ $rc -eq 0 ]; then
-      log "DONE  $s SLAM (${h}h${m}m) — copying to Drive..."
+    if scene_complete "output/Replica/$s"; then
+      log "DONE  $s SLAM (rc=$rc, ${h}h${m}m) — culled final mesh present, copying to Drive..."
       mkdir -p "$DRIVE_SCENE_OUT"
       cp -r "output/Replica/$s/"* "$DRIVE_SCENE_OUT/" 2>>"$MASTER_LOG"
       log "SAVED $s -> $DRIVE_SCENE_OUT"
     else
-      log "FAIL  $s SLAM (rc=$rc, ${h}h${m}m) — continuing"
+      log "FAIL  $s SLAM (rc=$rc, ${h}h${m}m) — NO culled final mesh; run died mid-sequence."
+      log "      Leaving partial output OUT of Drive so the next launch retries cleanly."
       continue
     fi
   fi

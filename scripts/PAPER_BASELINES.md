@@ -24,28 +24,35 @@ per-scene breakdown is in the supplementary, which is not in the public arXiv HT
 
 ## What we are reproducing
 
-User picked a subset of 4 scenes (room0, room1, office0, office1) — half of
-the paper's 8 — and we will run each **once** (not 5×). So our comparison is
-necessarily less rigorous, but the **average across our 4 scenes should land
-in the ballpark** of the paper's 8-scene average if reproduction is successful.
+We reproduce **all 8 scenes** (room0/1/2 + office0/1/2/3/4), running each
+**once** (not 5×). Data for all 8 comes from vMAP's `vmap.zip` (the public
+source the authors' data_generation pipeline renders from), paired with the
+authors' pretrained segmentation head + `semantic_classes.pkl`; label
+compatibility is validated per scene by `colab_setup_sni.sh` before any run.
 
-A defensible reproduction would land within ~30% of the paper's numbers on
-each metric on the aggregate of our subset. Larger gaps would prompt a
-debug pass (data layout, weights, env stack, hyperparameters).
+Our 8-scene average is therefore directly comparable to the paper's 8-scene
+average. The only intended departures from the paper: 1× per scene instead of
+5× (so we report the mean over 8 single runs, not 40), and vMAP's distributed
+renders standing in for the authors' unreleased office/room2 renders.
+
+A successful "works as the authors intended" claim lands within ~30% of the
+paper's numbers on the 8-scene aggregate. Larger gaps prompt a debug pass
+(data layout, weights, env stack, hyperparameters).
 
 ## What to fill in after our runs land
 
-| metric            | paper avg | our subset avg | gap |
-|-------------------|-----------|----------------|-----|
-| Depth L1 [cm]     | 0.766     | ?              | ?   |
-| Acc. [cm]         | 1.942     | ?              | ?   |
-| Comp. [cm]        | 1.702     | ?              | ?   |
-| Comp. Ratio [%]   | 96.624    | ?              | ?   |
-| ATE Mean [cm]     | 0.397     | ?              | ?   |
-| ATE RMSE [cm]     | 0.456     | ?              | ?   |
+| metric            | paper avg | our 8-scene avg | gap |
+|-------------------|-----------|-----------------|-----|
+| Depth L1 [cm]     | 0.766     | ?               | ?   |
+| Acc. [cm]         | 1.942     | ?               | ?   |
+| Comp. [cm]        | 1.702     | ?               | ?   |
+| Comp. Ratio [%]   | 96.624    | ?               | ?   |
+| ATE Mean [cm]     | 0.397     | ?               | ?   |
+| ATE RMSE [cm]     | 0.456     | ?               | ?   |
 
-To populate the "our subset avg" column, average the per-scene values from
-`scripts/_eval/<scene>_metrics.txt` outputs across the 4 scenes.
+To populate the "our 8-scene avg" column, average the per-scene values from
+the `MyDrive/Outputs/sni_slam_replica/_eval/<scene>_metrics.txt` outputs
+across all 8 scenes.
 
 ## Optional: per-scene targets (need supplementary)
 

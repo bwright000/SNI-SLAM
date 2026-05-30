@@ -25,11 +25,12 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# The SNI-SLAM authors' Google Drive only distributes a 2-scene subset:
-# room_0.zip + room_1.zip (confirmed 2026-05-20). office0-4 / room2 require
-# the data_generation/ Habitat-Sim pipeline to regenerate. Default to the
-# two available scenes; override with SCENES if you regenerate more.
-SCENES_DEFAULT="room0 room1"
+# All 8 Replica scenes. colab_setup_sni.sh now stages every scene from vMAP's
+# vmap.zip (label-compatible with the authors' pretrained seg head), so the
+# full paper set is reproducible. Each scene is auto-skipped below if its data
+# is not actually present, so this default is safe even on a partial stage.
+# Override with SCENES="room0 room1" for a quick subset.
+SCENES_DEFAULT="room0 room1 room2 office0 office1 office2 office3 office4"
 SCENES=${SCENES:-$SCENES_DEFAULT}
 
 DRIVE_OUT=/content/drive/MyDrive/Outputs/sni_slam_replica

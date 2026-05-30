@@ -3,38 +3,44 @@
 # colab_setup_sni.sh — SINGLE self-contained SNI-SLAM Colab bootstrap.
 #
 # Reproduces the SNI-SLAM (CVPR 2024) Replica results on a Colab T4 by
-# building the authors' EXACT environment and staging the authors' EXACT
-# data + segmentation weights. Scope: room0 + room1 (the only two Replica
-# scenes the authors distribute). This is a SETUP-ONLY script — it leaves
-# the env ready and prints the run + eval commands to fire yourself.
+# building the authors' EXACT environment and staging ALL 8 Replica scenes
+# (room0/1/2 + office0/1/2/3/4) in a label-compatible way, so you can claim
+# "SNI-SLAM works as the authors intended". This is a SETUP-ONLY script — it
+# leaves the env + data ready and prints the run + eval commands to fire.
 #
-# Run it from a fresh Colab tunnel terminal in ONE of two ways:
+# Data provenance (researched):
+#   - The authors only distribute room_0 + room_1 on their Drive. Their
+#     data_generation/ pipeline renders from vMAP's Replica source meshes +
+#     vMAP trajectories (replica_render_config_vMAP.yaml -> /data0/vmap/...).
+#   - vMAP (Kong et al., CVPR 2023) publicly distributes all 8 rendered
+#     scenes. vMAP's per-scene layout is rgb/rgb_N.png, depth/depth_N.png,
+#     semantic_class/semantic_class_N.png, traj_w_c.txt — a 1:1 match for
+#     SNI-SLAM's loader except the trajectory file is named traj_w_c.txt
+#     (both are camera-to-world), so we just rename it to traj.txt.
+#   - The semantic class IDs come from the same Replica info_semantic.json
+#     mapping the authors used, so the authors' pretrained segmentation head
+#     (seg/dinov2_replica.pth) + semantic_classes.pkl stay valid. We VALIDATE
+#     this on all 8 scenes before declaring success.
 #
-#   A) one-liner, from a bare tunnel (script self-clones the repo):
+#   => All 8 scenes from vMAP vmap.zip + the authors' seg/ weights = a
+#      faithful, label-consistent 8-scene reproduction.
+#
+# Run from a fresh Colab tunnel terminal, EITHER:
+#   A) one-liner from a bare tunnel (script self-clones the repo):
 #      curl -fsSL https://raw.githubusercontent.com/bwright000/sni-slam/main/scripts/colab_setup_sni.sh | bash
-#
 #   B) if you already cloned the repo:
 #      bash sni-slam/scripts/colab_setup_sni.sh
 #
-# What it does, in order:
-#   0. Ensure the repo is checked out (clone if run standalone)
-#   1. GPU verify
-#   2. apt: libopenexr-dev (required by the openexr pip wheel)
-#   3. miniconda install (if absent)
-#   4. Restore conda env from Drive cache, else build from environment.yaml
-#      (Py 3.7.11 / PyTorch 1.11.0+cu113 / pytorch3d 0.7.1 — the paper stack)
-#   5. Verify imports inside the env
-#   6. Stage data + weights (Drive cache → gdown → My-Drive quota fallback)
-#   7. Patch any hardcoded /data0/* config paths to repo-relative
-#   8. Cache the freshly-built env back to Drive for next session
+# Google Drive is OPTIONAL but RECOMMENDED: if /content/drive/MyDrive is
+# mounted it caches the (heavy) extracted data + the conda env so re-runs
+# after a session death are fast, and acts as a quota fallback for the seg
+# weights. Without it the script still works but re-downloads each session.
 #
-# Google Drive is OPTIONAL. If /content/drive/MyDrive is mounted it is used
-# for caching (faster re-runs) and as a quota fallback for the big files.
-# If it is not mounted the script still works — it just can't cache or use
-# the My-Drive copy workaround.
-#
-# Time budget (T4):
-#   Cold:  ~25-40 min env build + ~10-20 min data download
+# Disk + time budget (T4):
+#   vmap.zip is 44.8 GB (single file — no per-scene option). Peak disk during
+#   extraction ~55-65 GB; ~20 GB after the zip is deleted. Fits a T4 runtime
+#   but is tight — keep Drive mounted so you only pay this once.
+#   Cold:  ~25-40 min env build + ~30-60 min vMAP download/extract
 #   Warm:  ~3-5 min env restore + ~3-5 min data restore (needs Drive cache)
 # ============================================================
 set -eo pipefail
@@ -42,7 +48,7 @@ set -eo pipefail
 # ---------------------------------------------------------------------
 # 0. Locate or clone the repo
 # ---------------------------------------------------------------------
-echo "[0/8] locating repo..."
+echo "[0] locating repo..."
 REPO_URL=${SNI_REPO_URL:-https://github.com/bwright000/sni-slam.git}
 REPO_BRANCH=${SNI_REPO_BRANCH:-main}
 
@@ -56,7 +62,7 @@ if [ -n "$CAND" ] && [ -f "$CAND/run.py" ]; then
 elif [ -f "./run.py" ] && [ -f "./environment.yaml" ]; then
   REPO_ROOT="$(pwd)"                                  # CWD is the checkout
 else
-  REPO_ROOT=${SNI_REPO_DIR:-/content/sni-slam}        # standalone → clone
+  REPO_ROOT=${SNI_REPO_DIR:-/content/sni-slam}        # standalone -> clone
   if [ ! -f "$REPO_ROOT/run.py" ]; then
     echo "  cloning $REPO_URL ($REPO_BRANCH) -> $REPO_ROOT"
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$REPO_ROOT"
@@ -69,10 +75,13 @@ DRIVE_ROOT=/content/drive/MyDrive
 DRIVE_CACHE=$DRIVE_ROOT/sni_cache
 DRIVE_ENV_TAR=$DRIVE_CACHE/sni_env.tar.gz
 DRIVE_DATA_DIR=$DRIVE_CACHE/sni_data
-GDRIVE_FOLDER_ID="1BCu8bCGKG9HmnLFbyx7DIHI0slgkeo4h"   # authors' README link
 CONDA_PREFIX_PATH=/opt/conda
 ENV_NAME=sni
 ENV_PATH=$CONDA_PREFIX_PATH/envs/$ENV_NAME
+
+# All 8 Replica scenes (folder names as the SNI-SLAM configs expect them).
+SCENES="room_0 room_1 room_2 office_0 office_1 office_2 office_3 office_4"
+VMAP_ZIP_URL="https://huggingface.co/datasets/kxic/vMAP/resolve/main/vmap.zip"
 
 if [ -d "$DRIVE_ROOT" ]; then
   DRIVE_OK=1
@@ -81,7 +90,7 @@ if [ -d "$DRIVE_ROOT" ]; then
 else
   DRIVE_OK=0
   echo "  Google Drive NOT mounted at $DRIVE_ROOT — no caching / no quota fallback."
-  echo "    (To enable: run a Colab notebook cell with"
+  echo "    (To enable: in a Colab notebook cell run"
   echo "       from google.colab import drive; drive.mount('/content/drive')"
   echo "     then re-run this script.)"
 fi
@@ -90,7 +99,7 @@ fi
 # 1. GPU verify
 # ---------------------------------------------------------------------
 echo ""
-echo "[1/8] GPU check..."
+echo "[1] GPU check..."
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || {
   echo "ERROR: no GPU detected. Select a T4 GPU runtime in Colab and re-run."
   exit 1
@@ -100,15 +109,15 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || {
 # 2. apt deps
 # ---------------------------------------------------------------------
 echo ""
-echo "[2/8] apt: libopenexr-dev..."
+echo "[2] apt: libopenexr-dev, unzip, wget..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq libopenexr-dev unzip
+sudo apt-get install -y -qq libopenexr-dev unzip wget
 
 # ---------------------------------------------------------------------
-# 3. miniconda install (if needed)
+# 3. miniconda install (if needed) + channel ToS
 # ---------------------------------------------------------------------
 echo ""
-echo "[3/8] conda check..."
+echo "[3] conda check..."
 if [ ! -x "$CONDA_PREFIX_PATH/bin/conda" ]; then
   echo "  installing miniconda to $CONDA_PREFIX_PATH..."
   curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
@@ -119,20 +128,17 @@ fi
 # shellcheck disable=SC1091
 source $CONDA_PREFIX_PATH/etc/profile.d/conda.sh
 conda --version
-
-# Accept Anaconda channel Terms of Service. environment.yaml uses 'defaults'
-# (repo.anaconda.com/pkgs/{main,r}); recent conda refuses non-interactive
-# installs from these until ToS is accepted. Idempotent; '|| true' so older
-# conda without the 'tos' subcommand doesn't abort.
+# environment.yaml uses the 'defaults' channel (repo.anaconda.com/pkgs/{main,r});
+# recent conda refuses non-interactive installs until ToS is accepted. Idempotent.
 echo "  accepting Anaconda channel ToS (pkgs/main, pkgs/r)..."
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r    2>/dev/null || true
 
 # ---------------------------------------------------------------------
-# 4. Restore or build the 'sni' env
+# 4. Restore or build the 'sni' env (Py3.7 / PT1.11+cu113 / pytorch3d 0.7.1)
 # ---------------------------------------------------------------------
 echo ""
-echo "[4/8] conda env 'sni'..."
+echo "[4] conda env 'sni'..."
 if [ -d "$ENV_PATH" ]; then
   echo "  env already present at $ENV_PATH — skipping build/restore"
 elif [ "$DRIVE_OK" = "1" ] && [ -f "$DRIVE_ENV_TAR" ]; then
@@ -143,7 +149,7 @@ elif [ "$DRIVE_OK" = "1" ] && [ -f "$DRIVE_ENV_TAR" ]; then
 else
   echo "  no cache — building from environment.yaml (~25-35 min)..."
   conda env create -f "$REPO_ROOT/environment.yaml"
-  echo "  built. Will tar+upload to Drive at step 8 (if Drive mounted)."
+  echo "  built. Will tar+upload to Drive at the env-cache step (if Drive mounted)."
   ENV_FRESHLY_BUILT=1
 fi
 
@@ -151,7 +157,7 @@ fi
 # 5. Import sanity-check inside the env
 # ---------------------------------------------------------------------
 echo ""
-echo "[5/8] import sanity check..."
+echo "[5] import sanity check..."
 conda activate $ENV_NAME
 python - <<'PY'
 import torch, cv2
@@ -160,157 +166,246 @@ print(f"  cv2         {cv2.__version__}")
 for mod in ("pytorch3d", "open3d", "OpenEXR", "timm"):
     try:
         m = __import__(mod)
-        v = getattr(m, "__version__", "OK")
-        print(f"  {mod:<11} {v}")
+        print(f"  {mod:<11} {getattr(m,'__version__','OK')}")
     except Exception as e:
         print(f"  {mod:<11} FAIL  {e}")
 PY
 
 # ---------------------------------------------------------------------
-# 6. Data + weights — restore or download (room0 + room1 only)
+# 6. Segmentation weights (authors' Drive) — restore / gdown / quota fallback
 # ---------------------------------------------------------------------
 echo ""
-echo "[6/8] data + weights..."
-DATA_TARGET="$REPO_ROOT/data/replica"
+echo "[6] segmentation weights (seg/)..."
 SEG_TARGET="$REPO_ROOT/seg"
-mkdir -p "$DATA_TARGET" "$SEG_TARGET"
+mkdir -p "$SEG_TARGET"
 
-if [ "$DRIVE_OK" = "1" ] && [ -d "$DRIVE_DATA_DIR/replica" ] && \
-   [ -f "$DRIVE_DATA_DIR/seg/dinov2_replica.pth" ]; then
-  echo "  restoring from Drive cache: $DRIVE_DATA_DIR"
-  cp -r "$DRIVE_DATA_DIR/replica/"* "$DATA_TARGET/" 2>/dev/null || true
-  cp -r "$DRIVE_DATA_DIR/seg/"*     "$SEG_TARGET/"  2>/dev/null || true
+if [ "$DRIVE_OK" = "1" ] && [ -f "$DRIVE_DATA_DIR/seg/dinov2_replica.pth" ]; then
+  echo "  restoring seg/ from Drive cache"
+  cp -r "$DRIVE_DATA_DIR/seg/"* "$SEG_TARGET/" 2>/dev/null || true
+elif [ -f "$SEG_TARGET/dinov2_replica.pth" ] && [ -d "$SEG_TARGET/facebookresearch_dinov2_main" ]; then
+  echo "  seg/ already present — skipping"
 else
-  # `gdown --folder` is unreliable: it aborts the whole transfer if any single
-  # file hits Google's per-file download quota ("had many accesses"), which the
-  # popular dinov2_replica.pth / room_*.zip do. Fetch each file by its own ID
-  # instead — direct file mode is less rate-limited than folder mode.
-  # File IDs captured 2026-05-20 from folder $GDRIVE_FOLDER_ID. The authors'
-  # distributed subset is room_0 + room_1 only.
-  echo "  downloading individual files by ID..."
+  echo "  downloading seg artifacts by file ID (authors' Drive folder 1BCu8...)..."
   pip install -q gdown
-  STAGING=/content/sni_download
-  mkdir -p "$STAGING/seg"
+  STAGING=/content/sni_seg_dl
+  mkdir -p "$STAGING"
+  gdown 1ffPsH3NWK8GqoeSXDTGWo-QfC-LbhYvU -O "$STAGING/dinov2_replica.pth"               || echo "  WARN dinov2_replica.pth failed (quota?) — fallback below"
+  gdown 12QnXVswA1yiet-zmhzkLNsjCpboOLQBS -O "$STAGING/facebookresearch_dinov2_main.zip" || true
+  gdown 1A-pm0LWQZzevNdMZ14EP0z_b83t2-JuF -O "$STAGING/num_semantic_class.pkl"           || true
+  gdown 1gRbgMobHhZCa63dcOSGpjKK7UUVK6vcW -O "$STAGING/semantic_classes.pkl"             || true
 
-  # seg/ artifacts
-  gdown 1ffPsH3NWK8GqoeSXDTGWo-QfC-LbhYvU -O "$STAGING/seg/dinov2_replica.pth"               || echo "  WARN dinov2_replica.pth failed (quota?) — see fallback below"
-  gdown 12QnXVswA1yiet-zmhzkLNsjCpboOLQBS -O "$STAGING/seg/facebookresearch_dinov2_main.zip" || true
-  gdown 1A-pm0LWQZzevNdMZ14EP0z_b83t2-JuF -O "$STAGING/seg/num_semantic_class.pkl"           || true
-  gdown 1gRbgMobHhZCa63dcOSGpjKK7UUVK6vcW -O "$STAGING/seg/semantic_classes.pkl"             || true
-
-  # Replica scene zips (the distributed subset)
-  gdown 1cDpqqb49V_SpU4seSTHc2CQegUAi1Af7 -O "$STAGING/room_0.zip" || true
-  gdown 16WI3WNtP0-dLw8maHOYwiZhgYQL5eNGw -O "$STAGING/room_1.zip" || true
-
-  # Per-file daily quota blocks gdown on the large/popular files with
-  # "Cannot retrieve the public link... had many accesses". gdown cannot
-  # bypass it. Fallback (Drive only): look on the user's own My Drive for a
-  # manual copy (Make a copy -> fresh ID -> no quota) and use that instead.
-  if [ "$DRIVE_OK" = "1" ]; then
-    declare -A QUOTA_FALLBACK=(
-      ["$STAGING/seg/dinov2_replica.pth"]="*dinov2_replica*.pth"
-      ["$STAGING/room_0.zip"]="*room_0*.zip"
-      ["$STAGING/room_1.zip"]="*room_1*.zip"
-    )
-    for dest in "${!QUOTA_FALLBACK[@]}"; do
-      if [ ! -s "$dest" ]; then
-        pat="${QUOTA_FALLBACK[$dest]}"
-        hit=$(find "$DRIVE_ROOT" -maxdepth 3 -iname "$pat" 2>/dev/null | head -1)
-        if [ -n "$hit" ]; then
-          echo "  quota fallback: $(basename "$dest") <- $hit"
-          cp "$hit" "$dest"
-        else
-          echo "  MISSING $(basename "$dest") — gdown quota-blocked, no My-Drive copy found."
-          echo "    Open it in a browser, 'Make a copy' into My Drive, then re-run."
-        fi
-      fi
-    done
+  # dinov2_replica.pth is popular -> Google per-file quota can block gdown with
+  # "had many accesses". Fallback (Drive only): use a manual My-Drive copy.
+  if [ "$DRIVE_OK" = "1" ] && [ ! -s "$STAGING/dinov2_replica.pth" ]; then
+    hit=$(find "$DRIVE_ROOT" -maxdepth 3 -iname "*dinov2_replica*.pth" 2>/dev/null | head -1)
+    if [ -n "$hit" ]; then
+      echo "  quota fallback: dinov2_replica.pth <- $hit"
+      cp "$hit" "$STAGING/dinov2_replica.pth"
+    fi
+  fi
+  if [ ! -s "$STAGING/dinov2_replica.pth" ]; then
+    echo "  MISSING dinov2_replica.pth — gdown quota-blocked and no My-Drive copy."
+    echo "    Open https://drive.google.com/uc?id=1ffPsH3NWK8GqoeSXDTGWo-QfC-LbhYvU"
+    echo "    -> 'Make a copy' into My Drive (your copy has no quota) -> re-run."
+    exit 1
   fi
 
-  echo "  inventory of $STAGING:"
-  ls -la "$STAGING" "$STAGING/seg"
-
-  # Organise seg artifacts
-  cp -v "$STAGING/seg/"* "$SEG_TARGET/" 2>/dev/null || true
+  cp -v "$STAGING/"* "$SEG_TARGET/" 2>/dev/null || true
   if [ -f "$SEG_TARGET/facebookresearch_dinov2_main.zip" ] && \
      [ ! -d "$SEG_TARGET/facebookresearch_dinov2_main" ]; then
     echo "  unzipping facebookresearch_dinov2_main.zip..."
     (cd "$SEG_TARGET" && unzip -q facebookresearch_dinov2_main.zip)
   fi
+  rm -rf "$STAGING"
+  if [ "$DRIVE_OK" = "1" ]; then
+    mkdir -p "$DRIVE_DATA_DIR/seg"
+    cp -r "$SEG_TARGET/"* "$DRIVE_DATA_DIR/seg/" 2>/dev/null || true
+  fi
+fi
+[ -f "$SEG_TARGET/dinov2_replica.pth" ]           && echo "  seg/dinov2_replica.pth             ✓" || { echo "  seg/dinov2_replica.pth MISSING"; exit 1; }
+[ -d "$SEG_TARGET/facebookresearch_dinov2_main" ] && echo "  seg/facebookresearch_dinov2_main/  ✓" || echo "  seg/facebookresearch_dinov2_main/  MISSING"
+[ -f "$SEG_TARGET/semantic_classes.pkl" ]         && echo "  seg/semantic_classes.pkl           ✓" || echo "  seg/semantic_classes.pkl           MISSING"
+[ -f "$SEG_TARGET/num_semantic_class.pkl" ]       && echo "  seg/num_semantic_class.pkl         ✓" || echo "  seg/num_semantic_class.pkl         MISSING"
 
-  # Unzip Replica scene zips into data/replica/. Internal folder is
-  # 'room_0' / 'room_1' (matching the config's data/replica/room_0 path).
-  for z in "$STAGING"/room_*.zip; do
-    [ -f "$z" ] || continue
-    echo "  unzipping $(basename "$z") into $DATA_TARGET ..."
-    unzip -q -o "$z" -d "$DATA_TARGET"
+# ---------------------------------------------------------------------
+# 7. Data — all 8 scenes from vMAP vmap.zip (restore / download / extract)
+# ---------------------------------------------------------------------
+echo ""
+echo "[7] data (8 Replica scenes from vMAP)..."
+DATA_TARGET="$REPO_ROOT/data/replica"
+mkdir -p "$DATA_TARGET"
+
+scene_ready() { [ -f "$DATA_TARGET/$1/traj.txt" ] && [ -d "$DATA_TARGET/$1/semantic_class" ] && [ -d "$DATA_TARGET/$1/rgb" ]; }
+
+have_all=1
+for S in $SCENES; do scene_ready "$S" || have_all=0; done
+
+if [ "$have_all" = "1" ]; then
+  echo "  all 8 scenes already present at $DATA_TARGET — skipping fetch"
+elif [ "$DRIVE_OK" = "1" ] && [ -d "$DRIVE_DATA_DIR/replica" ] && \
+     [ -f "$DRIVE_DATA_DIR/replica/office_4/traj.txt" ]; then
+  echo "  restoring 8 scenes from Drive cache: $DRIVE_DATA_DIR/replica"
+  cp -r "$DRIVE_DATA_DIR/replica/"* "$DATA_TARGET/" 2>/dev/null || true
+else
+  ZIP=/content/vmap.zip
+  EXTRACT=/content/vmap_extract
+  echo "  downloading vmap.zip (44.8 GB, resumable)..."
+  wget -c -O "$ZIP" "$VMAP_ZIP_URL"
+
+  echo "  indexing zip members..."
+  unzip -Z1 "$ZIP" > /tmp/vmap_members.txt
+  echo "  total members: $(wc -l < /tmp/vmap_members.txt)"
+
+  # Discover each scene's traj-00 root WITHOUT hardcoding the internal nesting
+  # (could be <prefix>/room_0/imap/00 or .../vmap/00 etc.). Prefer the '00'
+  # trajectory (== iMAP trajectory, what SNI-SLAM/NICE-SLAM use); fall back to
+  # any semantic_class dir for the scene.
+  declare -A SCENE_ROOT
+  PATTERNS=()
+  for S in $SCENES; do
+    line=$(grep -E "(^|/)${S}/.*00/semantic_class/" /tmp/vmap_members.txt | head -1)
+    [ -z "$line" ] && line=$(grep -E "(^|/)${S}/.*semantic_class/" /tmp/vmap_members.txt | head -1)
+    if [ -z "$line" ]; then
+      echo "  WARN: no semantic_class entry found for $S in vmap.zip"
+      continue
+    fi
+    root=$(echo "$line" | sed -E 's#/semantic_class/.*##')
+    SCENE_ROOT[$S]="$root"
+    echo "    $S -> $root"
+    PATTERNS+=("$root/rgb/*" "$root/depth/*" "$root/semantic_class/*" "$root/traj_w_c.txt" "$root/traj.txt")
   done
 
-  # Mirror to Drive cache for next session
+  if [ "${#PATTERNS[@]}" -eq 0 ]; then
+    echo "  FATAL: could not locate any scene inside vmap.zip. First 40 members:"
+    head -40 /tmp/vmap_members.txt
+    echo "  (Internal nesting differs from expectations — paste the above for a patch.)"
+    exit 1
+  fi
+
+  echo "  extracting traj-00 rgb+depth+semantic_class+traj for matched scenes..."
+  mkdir -p "$EXTRACT"
+  unzip -q -o "$ZIP" "${PATTERNS[@]}" -d "$EXTRACT" || true
+
+  for S in $SCENES; do
+    root="${SCENE_ROOT[$S]:-}"
+    [ -z "$root" ] && continue
+    dst="$DATA_TARGET/$S"
+    mkdir -p "$dst"
+    cp -r "$EXTRACT/$root/rgb"            "$dst/" 2>/dev/null || true
+    cp -r "$EXTRACT/$root/depth"          "$dst/" 2>/dev/null || true
+    cp -r "$EXTRACT/$root/semantic_class" "$dst/" 2>/dev/null || true
+    if   [ -f "$EXTRACT/$root/traj_w_c.txt" ]; then cp "$EXTRACT/$root/traj_w_c.txt" "$dst/traj.txt"
+    elif [ -f "$EXTRACT/$root/traj.txt" ];     then cp "$EXTRACT/$root/traj.txt"     "$dst/traj.txt"
+    else echo "  WARN: no trajectory file for $S"; fi
+  done
+
+  echo "  cleaning up zip + extract scratch..."
+  rm -f "$ZIP"; rm -rf "$EXTRACT"
+
   if [ "$DRIVE_OK" = "1" ]; then
-    echo "  caching downloaded data to $DRIVE_DATA_DIR..."
-    mkdir -p "$DRIVE_DATA_DIR/replica" "$DRIVE_DATA_DIR/seg"
+    echo "  caching extracted 8 scenes to Drive ($DRIVE_DATA_DIR/replica)..."
+    mkdir -p "$DRIVE_DATA_DIR/replica"
     cp -r "$DATA_TARGET/"* "$DRIVE_DATA_DIR/replica/" 2>/dev/null || true
-    cp -r "$SEG_TARGET/"*  "$DRIVE_DATA_DIR/seg/"     2>/dev/null || true
   fi
 fi
 
-echo "  data layout:"
-ls -d "$DATA_TARGET"/*/                            2>/dev/null | head -8 || true
-[ -f "$SEG_TARGET/dinov2_replica.pth" ]            && echo "  seg/dinov2_replica.pth             ✓" || echo "  seg/dinov2_replica.pth             MISSING"
-[ -d "$SEG_TARGET/facebookresearch_dinov2_main" ]  && echo "  seg/facebookresearch_dinov2_main/  ✓" || echo "  seg/facebookresearch_dinov2_main/  MISSING"
-[ -f "$SEG_TARGET/semantic_classes.pkl" ]          && echo "  seg/semantic_classes.pkl           ✓" || echo "  seg/semantic_classes.pkl           MISSING"
-[ -f "$SEG_TARGET/num_semantic_class.pkl" ]        && echo "  seg/num_semantic_class.pkl         ✓" || echo "  seg/num_semantic_class.pkl         MISSING"
+echo "  scene inventory:"
+for S in $SCENES; do
+  if scene_ready "$S"; then
+    n=$(ls "$DATA_TARGET/$S/rgb" 2>/dev/null | wc -l)
+    echo "    $S  ✓  ($n rgb frames)"
+  else
+    echo "    $S  MISSING"
+  fi
+done
 
 # ---------------------------------------------------------------------
-# 7. Idempotent config patches (repo was freshly cloned → fix /data0/* paths)
+# 8. Semantic-label compatibility gate (vMAP pixels vs authors' pkl)
+#    The authors ship ONE semantic_classes.pkl; datasets.py remaps each raw
+#    Replica ID to 0..N-1. Any ID present in the images but absent from the
+#    pkl would stay unmapped and corrupt the (pretrained) semantic head. Check
+#    every staged scene before declaring success.
 # ---------------------------------------------------------------------
 echo ""
-echo "[7/8] config patches..."
+echo "[8] semantic-label validation (all scenes)..."
+SCENES_ENV="$SCENES" DATA_ENV="$DATA_TARGET" SEG_ENV="$SEG_TARGET" python - <<'PY'
+import os, glob, pickle, sys
+import numpy as np, cv2
+scenes = os.environ["SCENES_ENV"].split()
+data   = os.environ["DATA_ENV"]
+seg    = os.environ["SEG_ENV"]
+with open(os.path.join(seg, "semantic_classes.pkl"), "rb") as f:
+    classes = set(int(x) for x in pickle.load(f))
+print(f"  authors' semantic_classes.pkl: {len(classes)} classes")
+bad = {}
+for s in scenes:
+    files = sorted(glob.glob(os.path.join(data, s, "semantic_class", "semantic_class_*.png")))
+    if not files:
+        print(f"  {s:<10} no semantic_class images — skipped")
+        continue
+    sample = files[:: max(1, len(files)//25)][:25]   # ~25 frames spread across the scene
+    ids = set()
+    for p in sample:
+        img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+        ids |= set(int(v) for v in np.unique(img))
+    missing = sorted(ids - classes)
+    status = "OK" if not missing else f"MISMATCH missing={missing}"
+    print(f"  {s:<10} {len(ids):>3} unique IDs  -> {status}")
+    if missing:
+        bad[s] = missing
+if bad:
+    print("\n  FAIL: vMAP semantic IDs not covered by the authors' pkl for:",
+          ", ".join(bad.keys()))
+    print("  The pretrained segmentation head would be inconsistent on these scenes.")
+    sys.exit(2)
+print("  PASS: every scene's semantic IDs are covered by the authors' pkl.")
+PY
+
+# ---------------------------------------------------------------------
+# 9. Idempotent config-path safeguard (no-op if already relative)
+# ---------------------------------------------------------------------
+echo ""
+echo "[9] config path safeguard..."
 SNI_YAML="$REPO_ROOT/configs/SNI-SLAM.yaml"
-if grep -q "/data0/nerf/sni-slam/seg/dinov2_replica.pth" "$SNI_YAML"; then
-  echo "  patching $SNI_YAML: seg paths -> relative"
+if grep -q "/data0/" "$SNI_YAML"; then
   sed -i "s|/data0/nerf/sni-slam/seg/dinov2_replica.pth|seg/dinov2_replica.pth|g" "$SNI_YAML"
-  sed -i "s|/data0/nerf/sni-slam/seg/|seg/|g"                                    "$SNI_YAML"
+  sed -i "s|/data0/nerf/sni-slam/seg/|seg/|g" "$SNI_YAML"
+  echo "  patched $SNI_YAML"
 else
-  echo "  $SNI_YAML already relative"
-fi
-OFFICE4_YAML="$REPO_ROOT/configs/Replica/office4.yaml"
-if [ -f "$OFFICE4_YAML" ] && grep -q "/data0/replica/office_4" "$OFFICE4_YAML"; then
-  echo "  patching $OFFICE4_YAML: input_folder -> relative"
-  sed -i "s|/data0/replica/office_4|data/replica/office_4|g" "$OFFICE4_YAML"
+  echo "  configs already use repo-relative paths"
 fi
 
 # ---------------------------------------------------------------------
-# 8. Cache the env tar back to Drive (only if freshly built and Drive mounted)
+# 10. Cache the env tar back to Drive (only if freshly built and Drive mounted)
 # ---------------------------------------------------------------------
 echo ""
-echo "[8/8] env cache..."
+echo "[10] env cache..."
 if [ "${ENV_FRESHLY_BUILT:-0}" = "1" ] && [ "$DRIVE_OK" = "1" ]; then
   echo "  tarring $ENV_PATH -> $DRIVE_ENV_TAR (~5-10 min, ~3-4 GB)"
   (cd "$CONDA_PREFIX_PATH/envs" && tar -czf "$DRIVE_ENV_TAR" "$ENV_NAME")
-  echo "  cached. Next session will restore instead of rebuild."
+  echo "  cached."
 else
   echo "  nothing to cache (env not freshly built, or Drive not mounted)."
 fi
 
 # ---------------------------------------------------------------------
-# Done — setup-only. Print the run + eval commands.
+# Done — setup-only. Print the run + eval plan for all 8 scenes.
 # ---------------------------------------------------------------------
 echo ""
 echo "============================================================"
-echo "Setup complete (env + data + weights staged for room0 + room1)."
+echo "Setup complete: env + seg weights + all 8 Replica scenes staged,"
+echo "and semantic labels validated against the authors' pretrained head."
 echo ""
-echo "Run SLAM (each ~1.5-2.5 h on a T4):"
-echo "  conda activate $ENV_NAME"
-echo "  cd $REPO_ROOT"
+echo "Run all 8 scenes (1 run each, ~16 h total; resumable across sessions):"
+echo "  conda activate $ENV_NAME && cd $REPO_ROOT"
+echo "  SCENES='room0 room1 room2 office0 office1 office2 office3 office4' \\"
+echo "    bash scripts/run_replica_subset.sh"
+echo ""
+echo "That runner saves each scene to Drive, skips finished scenes, and writes"
+echo "ATE + reconstruction metrics to MyDrive/Outputs/sni_slam_replica/_eval/."
+echo "Compare the 8-scene average against scripts/PAPER_BASELINES.md"
+echo "(paper: ATE RMSE 0.456 cm, Depth L1 0.766 cm, Comp.Ratio 96.6%)."
+echo ""
+echo "Single-scene smoke test first (recommended, ~2 h):"
 echo "  python -W ignore run.py configs/Replica/room0.yaml"
-echo "  python -W ignore run.py configs/Replica/room1.yaml"
-echo ""
-echo "Then evaluate against the paper baselines (PAPER_BASELINES.md):"
-echo "  python src/tools/eval_ate.py   configs/Replica/room0.yaml"
-echo "  python src/tools/eval_recon.py configs/Replica/room0.yaml"
-echo ""
-echo "Or fire both scenes + eval in one go with the resumable runner:"
-echo "  bash scripts/run_replica_subset.sh"
 echo "============================================================"

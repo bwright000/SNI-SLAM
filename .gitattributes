@@ -1,0 +1,3 @@
+# Shell scripts must keep LF endings — they run on Linux/Colab (curl|bash).
+# CRLF would break the shebang/interpreter with a literal \r.
+*.sh text eol=lf

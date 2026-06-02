@@ -92,29 +92,38 @@ for s in $ACTUAL_SCENES; do
     continue
   fi
 
+  # SNI-SLAM writes results into output/Replica/<scene>/<exp_name>/ (exp_name
+  # defaults to 'test' per replica.yaml). The 'scene_complete' check therefore
+  # needs the exp_name suffix; without it the check looks at the wrong dir
+  # and false-FAILs an actually-complete run. Read exp_name from the per-scene
+  # config (fallback 'test' if not present).
+  EXP_NAME=$(awk '/^[[:space:]]*exp_name:/{print $2; exit}' "$CFG" 2>/dev/null)
+  EXP_NAME=${EXP_NAME:-test}
+  LOCAL_OUT="output/Replica/$s/$EXP_NAME"
+
   DRIVE_SCENE_OUT=$DRIVE_OUT/$s
   if scene_complete "$DRIVE_SCENE_OUT"; then
     log "SKIP  $s SLAM (complete on Drive — culled final mesh present)"
     # Make sure local output is in place for eval
-    if [ ! -d "output/Replica/$s" ]; then
-      mkdir -p "output/Replica/$s"
-      cp -r "$DRIVE_SCENE_OUT/"* "output/Replica/$s/" 2>/dev/null || true
+    if [ ! -d "$LOCAL_OUT" ]; then
+      mkdir -p "$LOCAL_OUT"
+      cp -r "$DRIVE_SCENE_OUT/"* "$LOCAL_OUT/" 2>/dev/null || true
     fi
   else
     if [ -d "$DRIVE_SCENE_OUT" ] && [ "$(ls -A "$DRIVE_SCENE_OUT" 2>/dev/null)" ]; then
       log "REDO  $s — Drive output exists but is INCOMPLETE (no culled final mesh); re-running from scratch"
     fi
-    log "START $s"
+    log "START $s (local output: $LOCAL_OUT)"
     t0=$(date +%s)
     python -W ignore run.py "$CFG" >> "$MASTER_LOG" 2>&1
     rc=$?
     elapsed=$(( $(date +%s) - t0 ))
     h=$(( elapsed / 3600 ))
     m=$(( (elapsed % 3600) / 60 ))
-    if scene_complete "output/Replica/$s"; then
+    if scene_complete "$LOCAL_OUT"; then
       log "DONE  $s SLAM (rc=$rc, ${h}h${m}m) — culled final mesh present, copying to Drive..."
       mkdir -p "$DRIVE_SCENE_OUT"
-      cp -r "output/Replica/$s/"* "$DRIVE_SCENE_OUT/" 2>>"$MASTER_LOG"
+      cp -r "$LOCAL_OUT/"* "$DRIVE_SCENE_OUT/" 2>>"$MASTER_LOG"
       log "SAVED $s -> $DRIVE_SCENE_OUT"
     else
       log "FAIL  $s SLAM (rc=$rc, ${h}h${m}m) — NO culled final mesh; run died mid-sequence."

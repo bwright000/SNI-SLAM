@@ -158,9 +158,19 @@ for s in $ACTUAL_SCENES; do
   echo "" >> "$EVAL_OUT"
 
   # Reconstruction (depends on GT mesh being on disk)
+  # eval_recon.py reads gt_mesh from argparse (--gt_mesh PATH) and crashes with
+  # `ValueError: File type: nonetype not supported` if it's unset. Pass the
+  # NICE-SLAM cull_replica_mesh path explicitly. Scene names in that zip are
+  # un-underscored (room0.ply, office0.ply, ...) so we strip the underscore from
+  # our data dir name to match. Skip cleanly if the GT mesh isn't on disk.
   echo "## Reconstruction (eval_recon.py)" >> "$EVAL_OUT"
-  python src/tools/eval_recon.py "$CFG" >> "$EVAL_OUT" 2>&1 || \
-    echo "(eval_recon.py exited with error — GT mesh may be missing)" >> "$EVAL_OUT"
+  GT_MESH="cull_replica_mesh/${s}.ply"
+  if [ -f "$GT_MESH" ]; then
+    python src/tools/eval_recon.py "$CFG" --gt_mesh "$GT_MESH" >> "$EVAL_OUT" 2>&1 || \
+      echo "(eval_recon.py exited with error)" >> "$EVAL_OUT"
+  else
+    echo "(skipped — $GT_MESH not on disk; download cull_replica_mesh.zip from cvg-data.inf.ethz.ch/nice-slam/)" >> "$EVAL_OUT"
+  fi
 
   log "  eval written to $EVAL_OUT"
 done

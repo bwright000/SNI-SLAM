@@ -259,12 +259,16 @@ else
   # Discover each scene's traj-00 root WITHOUT hardcoding the internal nesting
   # (could be <prefix>/room_0/imap/00 or .../vmap/00 etc.). Prefer the '00'
   # trajectory (== iMAP trajectory, what SNI-SLAM/NICE-SLAM use); fall back to
-  # any semantic_class dir for the scene.
+  # any semantic_class dir for the scene. NOTE: `grep ... | head -1` is unsafe
+  # under `set -eo pipefail` because head closing the pipe early triggers
+  # SIGPIPE on grep, which pipefail propagates and set -e turns into a silent
+  # script death. Use `grep -m 1 ... || true` instead — built-in match limit
+  # avoids the SIGPIPE, and `|| true` covers the legitimate no-match case.
   declare -A SCENE_ROOT
   PATTERNS=()
   for S in $SCENES; do
-    line=$(grep -E "(^|/)${S}/.*00/semantic_class/" /tmp/vmap_members.txt | head -1)
-    [ -z "$line" ] && line=$(grep -E "(^|/)${S}/.*semantic_class/" /tmp/vmap_members.txt | head -1)
+    line=$(grep -m 1 -E "(^|/)${S}/.*00/semantic_class/" /tmp/vmap_members.txt || true)
+    [ -z "$line" ] && line=$(grep -m 1 -E "(^|/)${S}/.*semantic_class/" /tmp/vmap_members.txt || true)
     if [ -z "$line" ]; then
       echo "  WARN: no semantic_class entry found for $S in vmap.zip"
       continue
@@ -310,14 +314,32 @@ else
 fi
 
 echo "  scene inventory:"
+ready_count=0
 for S in $SCENES; do
   if scene_ready "$S"; then
     n=$(ls "$DATA_TARGET/$S/rgb" 2>/dev/null | wc -l)
     echo "    $S  ✓  ($n rgb frames)"
+    ready_count=$((ready_count + 1))
   else
     echo "    $S  MISSING"
   fi
 done
+
+# Hard assertion: at least one scene must be staged, else downstream SLAM
+# crashes with a confusing IndexError 7s into run.py. Fail loud here instead.
+expected=$(echo $SCENES | wc -w)
+if [ "$ready_count" -eq 0 ]; then
+  echo ""
+  echo "FATAL [7]: no scenes staged after data step. data/replica/ is empty."
+  echo "  Common causes:"
+  echo "    - vmap.zip corrupt or truncated -> rm /content/vmap.zip and re-run"
+  echo "    - internal zip layout differs from expectations -> paste /tmp/vmap_members.txt head"
+  echo "    - set -eo pipefail killed an earlier grep|head pipeline -> already patched"
+  exit 1
+elif [ "$ready_count" -lt "$expected" ]; then
+  echo ""
+  echo "WARN [7]: only $ready_count/$expected scenes staged. Sweep will skip missing ones."
+fi
 
 # ---------------------------------------------------------------------
 # 8. Semantic-label compatibility gate (vMAP pixels vs authors' pkl)

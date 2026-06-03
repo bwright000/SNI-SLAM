@@ -1,0 +1,9 @@
+# Goal A.1 (per HANDOVER_OVERNIGHT_2026-06-03 §3): tracking lr_T A/B gate on room0.
+# Baseline (configs/Replica/replica.yaml) uses lr_T: 0.002; paper text says 0.001.
+# Everything else identical to room0.yaml so any delta isolates lr_T.
+inherit_from: configs/Replica/room0.yaml
+tracking:
+  lr_T: 0.001
+data:
+  input_folder: data/replica/room_0/
+  output: output/Replica/room0_lrT001/test

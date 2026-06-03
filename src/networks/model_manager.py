@@ -40,7 +40,27 @@ class ModelManager:
 
     def get_dinov2(self):
         model = DINO2SEG(img_h=self.img_h, img_w=self.img_w, num_cls=self.n_classes, edge=self.crop_edge, dim=self.dim)
-        model.load_state_dict(torch.load(self.pretrained_model_path, map_location=self.device))
+        sd = torch.load(self.pretrained_model_path, map_location=self.device)
+        # The pretrained dinov2_replica.pth was trained with n_classes=52, so its
+        # segmentation_conv.3.{weight,bias} have shape [52,16,3,3]/[52]. When CRCD
+        # uses n_classes=4 these shapes diverge. load_state_dict(strict=False) does
+        # NOT silence shape mismatches (only missing/unexpected keys), so we drop
+        # the mismatched keys BEFORE the load. The final Conv2d is dead code under
+        # use_gt_semantic=True (DINO2SEG.forward iterates segmentation_conv[0..2]
+        # when mode='mapping'; see Mapper.py:476-481), so its random init is safe.
+        model_sd = model.state_dict()
+        dropped = []
+        for k in list(sd.keys()):
+            if k in model_sd and sd[k].shape != model_sd[k].shape:
+                dropped.append((k, tuple(sd[k].shape), tuple(model_sd[k].shape)))
+                del sd[k]
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if dropped:
+            print(f"[model_manager] DINO2SEG: dropped {len(dropped)} shape-mismatched keys "
+                  f"from pretrained ckpt before load: {dropped}")
+        if missing or unexpected:
+            print(f"[model_manager] DINO2SEG load_state_dict — "
+                  f"missing={list(missing)} unexpected={list(unexpected)}")
         return model
 
     def set_mode_feature(self):

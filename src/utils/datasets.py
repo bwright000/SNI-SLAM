@@ -321,8 +321,72 @@ class TUM_RGBD(BaseDataset):
         return pose
 
 
+class CRCD(BaseDataset):
+    """
+    CRCD-Published snippet loader.  Layout produced by Addons/preprocess/preprocess_crcd_for_sni.py:
+        <input_folder>/rgb/rgb_NNNNNN.png            -- rectified left, BGR uint8
+        <input_folder>/depth/depth_NNNNNN.png        -- MoGe-2 uint16, png_depth_scale=10000
+        <input_folder>/semantic_class/semantic_class_NNNNNN.png -- uint8, values in {0,1,2,3}
+        <input_folder>/traj.txt                      -- 16 floats per line, c2w in OpenCV/TUM frame
+    """
+    semantic_classes = np.array([0, 1, 2, 3], dtype=np.uint8)
+    num_semantic_class = 4
+
+    def __init__(self, cfg, args, scale, device='cuda:0'):
+        super(CRCD, self).__init__(cfg, args, scale, device)
+        self.color_paths = sorted(
+            glob.glob(f'{self.input_folder}/rgb/rgb_*.png'), key=self.sort_key)
+        self.depth_paths = sorted(
+            glob.glob(f'{self.input_folder}/depth/depth_*.png'), key=self.sort_key)
+        self.semantic_paths = sorted(
+            glob.glob(f'{self.input_folder}/semantic_class/semantic_class_*.png'), key=self.sort_key)
+        traj_path = f'{self.input_folder}/traj.txt'
+        with open(traj_path, "r") as f:
+            n_traj = sum(1 for line in f if line.strip())
+        n_min = min(len(self.color_paths), len(self.depth_paths),
+                    len(self.semantic_paths), n_traj)
+        if not (len(self.color_paths) == len(self.depth_paths) ==
+                len(self.semantic_paths) == n_traj):
+            raise ValueError(
+                f"CRCD frame-count mismatch under {self.input_folder}: "
+                f"rgb={len(self.color_paths)} depth={len(self.depth_paths)} "
+                f"sem={len(self.semantic_paths)} traj={n_traj}. Re-run preprocess."
+            )
+        self.color_paths = self.color_paths[:n_min]
+        self.depth_paths = self.depth_paths[:n_min]
+        self.semantic_paths = self.semantic_paths[:n_min]
+        self.n_img = n_min
+        self.load_poses(traj_path)
+
+    def sort_key(self, filepath):
+        base_name = os.path.basename(filepath)
+        num = re.findall(r'\d+', base_name)
+        if num:
+            return int(num[0])
+        return base_name
+
+    def load_poses(self, path):
+        # traj.txt is c2w in OpenCV/TUM frame (+x right, +y down, +z forward).
+        # SNI-SLAM's renderer expects OpenGL frame (+x right, +y up, -z forward),
+        # so flip y and z axes — identical convention to Replica.
+        self.poses = []
+        with open(path, "r") as f:
+            lines = [l for l in f.readlines() if l.strip()]
+        if len(lines) < self.n_img:
+            raise ValueError(
+                f"CRCD traj.txt has only {len(lines)} lines but n_img={self.n_img}"
+            )
+        for i in range(self.n_img):
+            c2w = np.array(list(map(float, lines[i].split()))).reshape(4, 4)
+            c2w[:3, 1] *= -1
+            c2w[:3, 2] *= -1
+            c2w = torch.from_numpy(c2w).float()
+            self.poses.append(c2w)
+
+
 dataset_dict = {
     "replica": Replica,
     "scannet": ScanNet,
-    "tumrgbd": TUM_RGBD
+    "tumrgbd": TUM_RGBD,
+    "crcd": CRCD
 }

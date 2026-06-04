@@ -255,7 +255,10 @@ if __name__ == '__main__':
     print(rec_mesh)
 
     calc_3d_metric(rec_mesh, args.gt_mesh)
-    # calc_2d_metric(rec_mesh, args.gt_mesh, n_imgs=1000)
+    # Depth L1 (paper "2D" metric, Table 4): uncommented 2026-06-04 per workflow w0urnhiws
+    # rank-5 (paper reports 0.766 cm; we want to confirm or refute this matches our recon).
+    # n_imgs=1000 matches paper protocol (suppl §2.3: "1000 random views").
+    calc_2d_metric(rec_mesh, args.gt_mesh, n_imgs=1000)
 
     # if args.metric_3d:
     #     calc_3d_metric(args.rec_mesh, gt_mesh)

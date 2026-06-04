@@ -1,0 +1,14 @@
+# C_2/001 — SNI-SLAM preliminary, paired with DDS-SLAM's c2_001_paperfaith_lrfix
+#
+# 730 frames; GT extent 29x11x17 mm.  Best-case-of-the-4 for tracker
+# benchmarking (largest motion).  Bound matches DDS-SLAM CRCD config.
+
+inherit_from: configs/CRCD/crcd_sni_base.yaml
+
+mapping:
+  bound: [[-0.12,0.17],[-0.04,0.20],[0.68,0.92]]
+  marching_cubes_bound: [[-0.12,0.17],[-0.04,0.20],[0.68,0.92]]
+
+data:
+  input_folder: data/CRCD/C2_001/
+  output: output/CRCD/c2_001/test

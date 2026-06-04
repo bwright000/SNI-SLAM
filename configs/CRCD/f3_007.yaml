@@ -1,0 +1,15 @@
+# F_3/007 — SNI-SLAM preliminary, paired with DDS-SLAM's f3_007_paperfaith_lrfix
+#
+# 300 frames; smallest GT motion of the 4 (1x3x3 mm extent).  Strict
+# sentinel-reject for tracker benchmarking — render-quality probe only.
+# Bound matches DDS-SLAM CRCD config.
+
+inherit_from: configs/CRCD/crcd_sni_base.yaml
+
+mapping:
+  bound: [[-0.108,0.133],[-0.046,0.197],[0.747,0.99]]
+  marching_cubes_bound: [[-0.108,0.133],[-0.046,0.197],[0.747,0.99]]
+
+data:
+  input_folder: data/CRCD/F3_007/
+  output: output/CRCD/f3_007/test

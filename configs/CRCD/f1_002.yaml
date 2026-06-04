@@ -1,0 +1,15 @@
+# F_1/002 — SNI-SLAM preliminary, paired with DDS-SLAM's f1_002_paperfaith_lrfix
+#
+# 1287 frames; longest snippet.  Extreme sub-SNR (~0.009 mm/f active median).
+# Render-quality + Sim3-aligned ATE only; raw ATE will be misleading.
+# Bound matches DDS-SLAM CRCD config.
+
+inherit_from: configs/CRCD/crcd_sni_base.yaml
+
+mapping:
+  bound: [[-0.08,0.13],[-0.03,0.18],[0.75,0.96]]
+  marching_cubes_bound: [[-0.08,0.13],[-0.03,0.18],[0.75,0.96]]
+
+data:
+  input_folder: data/CRCD/F1_002/
+  output: output/CRCD/f1_002/test

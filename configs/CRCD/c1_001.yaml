@@ -1,0 +1,14 @@
+# C_1/001 — SNI-SLAM preliminary, paired with DDS-SLAM's c1_001_paperfaith_lrfix
+#
+# Same data, same MoGe depth (with stereo-anchor sc_factor applied at preprocess),
+# same bound as DDS-SLAM CRCD config for direct comparability.
+
+inherit_from: configs/CRCD/crcd_sni_base.yaml
+
+mapping:
+  bound: [[-0.08,0.13],[-0.02,0.18],[0.68,0.90]]
+  marching_cubes_bound: [[-0.08,0.13],[-0.02,0.18],[0.68,0.90]]
+
+data:
+  input_folder: data/CRCD/C1_001/
+  output: output/CRCD/c1_001/test

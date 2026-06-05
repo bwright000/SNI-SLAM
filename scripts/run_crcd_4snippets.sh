@@ -332,6 +332,73 @@ PYEOF
     echo "$SC_FACTOR" > "$STAGED/.sc_factor_applied"
   fi
 
+  # ----------------------------------------------------------------------------
+  # PHASE 3.7 -- truncation tightening + freeze joint pose opt (render fix)
+  # User 2026-06-05 root cause analysis: with depth-only rescale (Phase 3.6),
+  # the geometry IS internally consistent:
+  #   - rescaled depth 0.10m (true metric)
+  #   - GT poses ~0.78m (true metric)
+  #   - scene world coord = pose + depth ≈ 0.88m
+  #   - bound z [0.68, 0.90] CONTAINS 0.88m ✓
+  # So the black renders are NOT from bound mismatch.  Diagnosis: joint pose
+  # optimization (joint_opt_cam_lr=0.0001) drifts est poses DURING mapping
+  # because trunc=0.06m is 60% of scene depth (0.10m) -> SDF gradient too
+  # shallow -> optimizer has slack to move poses without loss penalty.  Result:
+  # sim3_s=2.92 (est trajectory 3x compressed) -> est poses end up OUTSIDE
+  # bound -> tri-plane queries at render time return zero -> black renders.
+  # Surgical fix: shrink truncation by sc_factor + zero out joint_opt_cam_lr.
+  # Leave bound, traj.txt, and depth scale untouched.
+  # ----------------------------------------------------------------------------
+  phase "3.7.$KEY" "truncation tighten + freeze joint pose opt"
+  python - <<PYEOF
+import os, yaml
+SC = $SC_FACTOR
+def load_chain(p):
+    cfg = yaml.safe_load(open(p))
+    inh = cfg.get('inherit_from')
+    base = load_chain(inh) if inh else {}
+    def merge(a, b):
+        for k, v in b.items():
+            if isinstance(v, dict) and isinstance(a.get(k), dict): merge(a[k], v)
+            else: a[k] = v
+        return a
+    return merge(dict(base), cfg)
+
+orig = load_chain('$CONFIG')
+trunc_old = orig['model']['truncation']
+jopt_old  = orig['mapping'].get('joint_opt_cam_lr', 0.0)
+
+# Truncation: scale by sc_factor.  Empirically sharper SDF gradient prevents
+# the optimizer's pose drift.  For SC=0.17, trunc 0.06 -> 0.010 (10% of scene).
+trunc_new = trunc_old * SC
+
+# Freeze joint pose opt -- decouples mapper from tracker pose, prevents the
+# compression-during-mapping that produces sim3_s=2.92 and pushes est poses
+# outside the bound at render time.
+jopt_new = 0.0
+
+override = {
+    'inherit_from': os.path.abspath('$CONFIG'),
+    'mapping': {
+        'joint_opt_cam_lr': jopt_new,
+    },
+    'model': {
+        'truncation': trunc_new,
+    },
+}
+with open('$STAGED/scaled_config.yaml', 'w') as f:
+    yaml.safe_dump(override, f, default_flow_style=None, sort_keys=False)
+print(f'  truncation: {trunc_old:.4f} -> {trunc_new:.5f} (× sc_factor {SC:.4f})')
+print(f'  joint_opt_cam_lr: {jopt_old} -> {jopt_new} (frozen)')
+print(f'  bound + traj.txt UNCHANGED (geometry already consistent post Phase 3.6)')
+PYEOF
+
+  # Phase 5+6 use the scaled config so all downstream eval reads the same trunc
+  if [ -f "$STAGED/scaled_config.yaml" ]; then
+    CONFIG="$STAGED/scaled_config.yaml"
+    echo "  Phase 5+6 will use: $CONFIG"
+  fi
+
   # --------------------------------------------------------------------------
   # PHASE 4 -- motion profile sanity (non-blocking)
   # --------------------------------------------------------------------------

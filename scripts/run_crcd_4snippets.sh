@@ -264,33 +264,17 @@ PYEOF
   if [ -f "$STAGED/.sc_factor_applied" ]; then
     echo "  sc_factor already applied (cached)"
   else
-    python - <<PYEOF
-import cv2, numpy as np, os, sys, glob, json
-STAGED = '$STAGED'
-
-# Read rectified calibration
-calib = {}
-with open(f'{STAGED}/rectified_calib.txt') as f:
-    for line in f:
-        k, v = line.strip().split()
-        calib[k] = float(v)
-baseline_m   = calib['baseline_m']
-fx_rectified = calib['fx']
-print(f'  baseline    : {baseline_m*1000:.4f} mm')
-print(f'  fx rectified: {fx_rectified:.4f} px')
-
-# Frame 0 (SNI-SLAM consumes from idx 0)
-left_path  = f'{STAGED}/rgb/rgb_000000.png'
-right_path = f'{RAW}/rgbright/frame_{$(printf "%06d" 0).png'  # raw RIGHT not rectified-paired
-# SNI-SLAM preprocess only rectifies LEFT; RIGHT not staged.  Use raw right
-# (intrinsics.yaml says rgb/ + rgbright/ are pre-rectification, rectifying
-# right requires applying ecm_map_right_x/y).  Re-rectify right here.
-PYEOF
-    # NB: SNI-SLAM preprocess only rectifies LEFT.  For SGBM we'd need the
-    # rectified RIGHT.  Cheap option: skip Phase 3.6 stereo anchor on SNI-SLAM
-    # for tonight and rely on DDS-SLAM's per-snippet sc_factor (we already
-    # computed it on the same data).  Reuse the sc_factor that DDS-SLAM wrote.
-    # Lookup order: local Colab DDS cache -> Drive published cache -> default 1.0
+    # SNI-SLAM preprocess (preprocess_crcd_for_sni.py) only rectifies LEFT —
+    # the rectified RIGHT we'd need for SGBM is not staged, and re-rectifying
+    # right here in bash is fragile.  Instead reuse DDS-SLAM's per-snippet
+    # sc_factor which was computed on the same data via the proper Phase 1.6
+    # SGBM in the DDS-SLAM runbook.  Lookup order:
+    #   (1) $STAGED/.sc_factor       — Phase 3 rehydration wrote it
+    #   (2) DDS-SLAM local Colab     — same-session DDS-SLAM produced it
+    #   (3) Drive published cache    — cross-session published source
+    #   (4) Hardcoded known values   — last-resort: values verified from DDS-SLAM
+    #       2026-06-04 batch (config.json in each snippet's payload.tgz):
+    #         F3_007: 0.133682, C1_001: 0.169897, C2_001: 0.129950, F1_002: 0.143676
     DDS_SCF=/content/DDS-SLAM/data/CRCD/${NAME}/.sc_factor
     DRIVE_SCF=$DRIVE_CACHE_ROOT/$EP/snippet_$SID/depth/.sc_factor
     if [ -f "$STAGED/.sc_factor" ]; then
@@ -303,8 +287,16 @@ PYEOF
       SC_FACTOR=$(cat "$DRIVE_SCF")
       echo "  reusing Drive-cached sc_factor: $SC_FACTOR"
     else
-      SC_FACTOR=1.0
-      echo "  WARN: no .sc_factor cache found anywhere; using 1.0 (uncalibrated!)"
+      case "$KEY" in
+        f3_007) SC_FACTOR=0.133682 ;;
+        c1_001) SC_FACTOR=0.169897 ;;
+        c2_001) SC_FACTOR=0.129950 ;;
+        f1_002) SC_FACTOR=0.143676 ;;
+        *)      SC_FACTOR=1.0 ;;
+      esac
+      echo "  no .sc_factor in any cache; using hardcoded DDS-SLAM-computed value: $SC_FACTOR"
+      # Persist for resume / downstream Phase 6 etc.
+      echo "$SC_FACTOR" > "$STAGED/.sc_factor"
     fi
 
     APPLY=$(python -c "

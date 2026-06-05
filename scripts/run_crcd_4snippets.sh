@@ -390,19 +390,34 @@ PYEOF
     --csv "$DRIVE_ROOT/_traj_summary.csv" \
     --name "$KEY" 2>&1 | tee "$DRIVE_DST/extended_metrics.txt" || true
 
-  # Render eval (PSNR/SSIM/LPIPS)
-  if [ -d "$OUTPUT/rendered" ] || ls "$OUTPUT"/*.png >/dev/null 2>&1; then
-    RENDER_DIR=$([ -d "$OUTPUT/rendered" ] && echo "$OUTPUT/rendered" || echo "$OUTPUT")
+  # Post-hoc per-frame render (DDS-SLAM parity).
+  # SNI-SLAM's Frame_Visualizer (src/utils/Frame_Visualizer.py:55) saves only
+  # sparse composite matplotlib figures at vis_freq intervals — NOT clean
+  # per-frame RGB+depth like DDS-SLAM does at ddsslam.py:806-828.
+  # Without this post-hoc render, the runbook below would silently find 0
+  # rendered images and skip render eval entirely (validated by user on
+  # DDS-SLAM CRCD batch where the same issue led to render eval no-op).
+  # Renders go to $OUTPUT/rendered/*.jpg + $OUTPUT/rendered/depth/*.png
+  # — DDS-SLAM-compatible layout, so generate_video.py just works.
+  if [ ! -d "$OUTPUT/rendered" ] || [ -z "$(ls $OUTPUT/rendered/*.jpg 2>/dev/null | head -1)" ]; then
+    echo "  Phase 6a: rendering all frames from final ckpt..."
+    python Addons/viz/render_all_frames_sni.py "$CONFIG" --skip 1 2>&1 \
+      | tee "$DRIVE_DST/render_all.log" \
+      || echo "  WARN: render_all_frames_sni.py failed (eval will skip render metrics)"
+  fi
+
+  # Render eval (PSNR/SSIM/LPIPS) — now points at the post-hoc rendered dir
+  if [ -d "$OUTPUT/rendered" ] && ls "$OUTPUT/rendered"/*.jpg >/dev/null 2>&1; then
     python Addons/eval/eval_rendering.py \
       --gt_dir "$STAGED/rgb" \
-      --render_dir "$RENDER_DIR" \
+      --render_dir "$OUTPUT/rendered" \
       --name "$KEY" \
       --output_csv "$DRIVE_DST/render_eval.csv" \
       --summary_csv "$DRIVE_ROOT/_render_summary.csv" \
       --sequence "CRCD (${NAME})" 2>&1 | tee "$DRIVE_DST/render_eval.txt" || \
       echo "  render eval failed"
   else
-    echo "  no rendered/ dir — skip render eval"
+    echo "  no rendered/*.jpg present — skip render eval"
   fi
 
   # Depth L1 (recon metric) — requires GT mesh (not available for CRCD;

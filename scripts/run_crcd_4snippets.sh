@@ -261,8 +261,18 @@ PYEOF
   # sc_factor knob; we rescale on disk to maintain png_depth_scale=10000)
   # --------------------------------------------------------------------------
   phase "3.6.$KEY" "stereo anchor calibration + depth rescale if needed"
-  if [ -f "$STAGED/.sc_factor_applied" ]; then
-    echo "  sc_factor already applied (cached)"
+  # User 2026-06-05 root cause: prior runs touched .sc_factor_applied as an
+  # empty marker, so when sc_factor changed (1.0 fallback -> 0.1337 hardcoded)
+  # Phase 3.6 silently skipped the actual rescale -> SLAM ran on uncalibrated
+  # MoGe -> sim3_s=0.0009 (1100x too big) instead of expected ~0.08.
+  # Fix: .sc_factor_applied now stores the VALUE; we re-rescale on drift.
+  SCF_APPLIED_VAL=""
+  [ -f "$STAGED/.sc_factor_applied" ] && SCF_APPLIED_VAL=$(cat "$STAGED/.sc_factor_applied" 2>/dev/null)
+  SCF_EXPECTED_VAL=""
+  [ -f "$STAGED/.sc_factor" ] && SCF_EXPECTED_VAL=$(cat "$STAGED/.sc_factor")
+  if [ -n "$SCF_APPLIED_VAL" ] && [ -n "$SCF_EXPECTED_VAL" ] && \
+     [ "$(python -c "print(abs(float('$SCF_APPLIED_VAL') - float('$SCF_EXPECTED_VAL')) < 0.001)")" = "True" ]; then
+    echo "  sc_factor already applied (cached: $SCF_APPLIED_VAL)"
   else
     # SNI-SLAM preprocess (preprocess_crcd_for_sni.py) only rectifies LEFT —
     # the rectified RIGHT we'd need for SGBM is not staged, and re-rectifying

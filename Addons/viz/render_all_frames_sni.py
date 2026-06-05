@@ -123,7 +123,8 @@ def main():
     sni.shared_decoders = decoders
 
     # --- Load ckpt ---
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    # weights_only kwarg is torch>=2.0 only; SNI-SLAM env is torch 1.11 (Py 3.7)
+    ckpt = torch.load(ckpt_path, map_location=device)
     decoders.load_state_dict(ckpt['decoder_state_dict'])
     decoders.eval()
 

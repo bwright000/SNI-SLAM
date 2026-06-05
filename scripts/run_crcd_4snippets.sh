@@ -157,11 +157,17 @@ for ROW in "${SNIPPETS[@]}"; do
     rm -rf "$STAGED"
     mkdir -p "$STAGED"
     cd "$REPO_ROOT"
+    # --emit_config is a required arg in preprocess_crcd_for_sni.py, but we
+    # use the pre-built static configs (configs/CRCD/<key>.yaml from commit
+    # 1403de8) instead of the emit_config-derived one — those have the
+    # paper-faithful + F1 lr fix knobs.  Pass a throwaway path that gets
+    # ignored downstream (run.py reads $CONFIG, not this file).
     python Addons/preprocess/preprocess_crcd_for_sni.py \
       --snippet_dir "$RAW" \
       --calib_pkl   "$CALIB_PKL" \
       --output_dir  "$STAGED" \
       --snippet_id  "$NAME" \
+      --emit_config "$STAGED/_emitted_unused.yaml" \
       || { echo "FATAL: preprocess failed for $KEY"; exit 4; }
     touch "$STAGED/.PREPROCESSED"
   fi

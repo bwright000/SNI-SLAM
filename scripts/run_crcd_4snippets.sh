@@ -1,0 +1,421 @@
+#!/bin/bash
+# ============================================================================
+# SNI-SLAM CRCD 4-snippet batch — paired with DDS-SLAM crcd_paperfaith_lrfix.
+#
+# Per-snippet pipeline (sentinel-gated, resumable):
+#   Phase 0    pre-flight (A100, calib_pkl, dinov2, MoGe-2 importable)
+#   Phase 1    stage raw — TARBALL-FIRST (reuses DDS-SLAM tarballs on Drive)
+#   Phase 2    preprocess_crcd_for_sni.py: rectify rgb + sem + traj.txt
+#   Phase 2.5  ALSO emit rectified_calib.txt for Phase 1.6 stereo anchor
+#   Phase 3    MoGe-2 depth generation (skip if Drive cache complete)
+#   Phase 3.6  stereo anchor SGBM calibration; if sc_factor != 1.0 (>10% off),
+#              REGENERATE depth PNGs at corrected scale (SNI-SLAM has no
+#              sc_factor knob; cfg['scale'] is a global divisor only)
+#   Phase 4    motion profile sanity (sentinel-flagged, non-blocking)
+#   Phase 5    SNI-SLAM run.py
+#   Phase 6    eval: raw + SE3 + Sim3 + est_path/GT_path + per-axis Pearson
+#              via eval_traj_extended.py + Depth L1 via eval_recon.py
+#   Phase 7    ship to Drive
+#
+# After all 4: Phase 8 combined 4-snippet summary for DDS-SLAM comparison.
+#
+# Order: F_3/007 (300) -> C_1/001 (360) -> C_2/001 (730) -> F_1/002 (1287)
+# A100 wall: ~4-5 hr total.
+#
+# Configs (already pushed via 1403de8):
+#   configs/CRCD/crcd_sni_base.yaml  + per-snippet inheritors
+# ============================================================================
+set +u   # NB: some phase blocks rely on optional env vars
+set -o pipefail
+
+DATE=$(date +%Y%m%d)
+DRIVE_ROOT=/content/drive/MyDrive/Outputs/sni_crcd_4snippets_${DATE}
+mkdir -p "$DRIVE_ROOT"
+LOG="$DRIVE_ROOT/runbook.log"
+exec > >(tee -a "$LOG") 2>&1
+echo "=== sni-slam crcd 4-snippets start $(date -Iseconds) -- DRIVE_ROOT=$DRIVE_ROOT ==="
+
+phase() { echo ""; echo "[PHASE $1] $(date +%H:%M:%S) -- $2"; }
+done_marker() { [ -f "$1/.DONE" ]; }
+mark_done() { sync; touch "$1/.DONE"; sync; }
+
+CRCD_DRIVE_ROOT=/content/drive/MyDrive/Datasets/CRCD-Published
+CALIB_PKL=$CRCD_DRIVE_ROOT/cam_calib/ECM_STEREO_1280x720_L2R_calib_data_opencv.pkl
+DINOV2_PTH=/content/sni-slam/seg/dinov2_replica.pth
+REPO_ROOT=/content/sni-slam
+
+# Snippet table: key episode snippet_id slam_config frames
+SNIPPETS=(
+  "f3_007  F_3  snippet_007  configs/CRCD/f3_007.yaml  300"
+  "c1_001  C_1  snippet_001  configs/CRCD/c1_001.yaml  360"
+  "c2_001  C_2  snippet_001  configs/CRCD/c2_001.yaml  730"
+  "f1_002  F_1  snippet_002  configs/CRCD/f1_002.yaml  1287"
+)
+
+# ----------------------------------------------------------------------------
+# Pre-flight checks (run once)
+# ----------------------------------------------------------------------------
+phase 0 "pre-flight"
+[ -d /content/drive/MyDrive ] || { echo "FATAL: Drive not mounted"; exit 1; }
+if command -v nvidia-smi >/dev/null 2>&1; then
+  GPU=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)
+  echo "  GPU: $GPU"
+  if [[ ! "$GPU" =~ A100 ]]; then
+    echo "  WARN: non-A100 GPU.  SNI-SLAM mapper grows ~28 MB/frame; T4 likely OOM-deadlock."
+    echo "       Continuing — user may need to abort + switch."
+  fi
+else
+  echo "FATAL: nvidia-smi not on PATH"; exit 1
+fi
+[ -f "$CALIB_PKL" ] || { echo "FATAL: calib_pkl missing at $CALIB_PKL"; exit 1; }
+[ -f "$DINOV2_PTH" ] || { echo "FATAL: dinov2 pretrained missing at $DINOV2_PTH (run colab_setup_sni.sh)"; exit 1; }
+[ -f "$REPO_ROOT/Addons/preprocess/preprocess_crcd_for_sni.py" ] || { echo "FATAL: preprocess missing"; exit 1; }
+[ -f "$REPO_ROOT/Addons/depth/generate_depth_moge.py" ] || { echo "FATAL: MoGe gen missing"; exit 1; }
+[ -f "$REPO_ROOT/src/tools/eval_traj_extended.py" ] || { echo "FATAL: eval_traj_extended.py missing (git pull?)"; exit 1; }
+
+cd "$REPO_ROOT"
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "  dirty tree -- skipping pull"
+else
+  git fetch && git merge --ff-only origin/$(git rev-parse --abbrev-ref HEAD) || echo "  WARN: non-FF on remote, continuing"
+fi
+
+ensure_moge() {
+  if ! python -c 'from moge.model.v2 import MoGeModel' 2>/dev/null; then
+    echo "  installing MoGe-2..."
+    pip install -q git+https://github.com/microsoft/MoGe.git huggingface_hub 2>&1 | tail -3
+    python -c 'from moge.model.v2 import MoGeModel' \
+      || { echo "FATAL: MoGe-2 not importable after install"; return 1; }
+  fi
+}
+
+# ============================================================================
+# PER-SNIPPET LOOP
+# ============================================================================
+for ROW in "${SNIPPETS[@]}"; do
+  read -r KEY EP SNIP CONFIG FRAMES <<< "$ROW"
+  NAME=$(echo "$KEY" | tr '[:lower:]' '[:upper:]')   # e.g. c1_001 -> C1_001
+
+  echo ""
+  echo "############################################################"
+  echo "## SNIPPET $KEY  ($EP/$SNIP, $FRAMES frames)"
+  echo "############################################################"
+
+  RAW=/content/crcd_raw/${NAME}
+  STAGED=/content/sni-slam/data/CRCD/${NAME}
+  OUTPUT=/content/sni-slam/output/CRCD/${KEY}/test
+  DRIVE_DST=$DRIVE_ROOT/$KEY
+  mkdir -p "$DRIVE_DST"
+
+  if done_marker "$DRIVE_DST"; then
+    echo "  $KEY already shipped to Drive -- skip"; continue
+  fi
+
+  # --------------------------------------------------------------------------
+  # PHASE 1 -- stage raw from Drive (tarball-first; per-item cp fallback)
+  # --------------------------------------------------------------------------
+  phase "1.$KEY" "stage raw $EP/$SNIP from Drive"
+  DRIVE_TAR=$CRCD_DRIVE_ROOT/${EP}_${SNIP}_staging.tar
+  if [ -f "$RAW/.STAGED" ]; then
+    echo "  raw already staged"
+  elif [ -f "$DRIVE_TAR" ]; then
+    echo "  using tarball: $DRIVE_TAR ($(du -h "$DRIVE_TAR" | cut -f1))"
+    mkdir -p "$RAW"
+    T0=$(date +%s)
+    tar xf "$DRIVE_TAR" -C "$RAW" || { echo "FATAL: tarball extract failed"; exit 3; }
+    echo "  extracted in $(( ($(date +%s) - T0) / 60 )) min"
+    touch "$RAW/.STAGED"
+  else
+    DRIVE_SRC=$CRCD_DRIVE_ROOT/$EP/$SNIP
+    [ -d "$DRIVE_SRC" ] || { echo "FATAL: missing $DRIVE_SRC"; exit 3; }
+    echo "  WARN: no tarball at $DRIVE_TAR; falling back to per-item cp"
+    mkdir -p "$RAW"
+    for ITEM in rgb rgbright semantic_instance groundtruth.txt intrinsics.yaml; do
+      [ -e "$DRIVE_SRC/$ITEM" ] || { echo "  $ITEM missing on Drive, skipping"; continue; }
+      [ -e "$RAW/$ITEM" ] || cp -r "$DRIVE_SRC/$ITEM" "$RAW/$ITEM" \
+        || { echo "FATAL: cp failed for $ITEM"; exit 3; }
+    done
+    touch "$RAW/.STAGED"
+  fi
+  N_RAW=$(ls "$RAW/rgb"/*.png 2>/dev/null | wc -l)
+  echo "  raw rgb count: $N_RAW (expected $FRAMES)"
+  [ "$N_RAW" -ge "$FRAMES" ] || { echo "FATAL: raw count $N_RAW < $FRAMES"; exit 3; }
+
+  # --------------------------------------------------------------------------
+  # PHASE 2 -- preprocess: rectify rgb + sem, write traj.txt (use existing
+  # static config from configs/CRCD/<key>.yaml; do NOT --emit_config since
+  # we want the manually-tuned bound + DDS-SLAM-parity knobs)
+  # --------------------------------------------------------------------------
+  phase "2.$KEY" "preprocess (rectify via ECM_STEREO_L2R pickle)"
+  if [ -f "$STAGED/.PREPROCESSED" ]; then
+    echo "  preprocess already complete"
+  else
+    rm -rf "$STAGED"
+    mkdir -p "$STAGED"
+    cd "$REPO_ROOT"
+    python Addons/preprocess/preprocess_crcd_for_sni.py \
+      --snippet_dir "$RAW" \
+      --calib_pkl   "$CALIB_PKL" \
+      --output_dir  "$STAGED" \
+      --snippet_id  "$NAME" \
+      || { echo "FATAL: preprocess failed for $KEY"; exit 4; }
+    touch "$STAGED/.PREPROCESSED"
+  fi
+  N_RGB=$(ls "$STAGED/rgb"/*.png 2>/dev/null | wc -l)
+  N_SEM=$(ls "$STAGED/semantic_class"/*.png 2>/dev/null | wc -l)
+  N_TRAJ=$(wc -l < "$STAGED/traj.txt" 2>/dev/null || echo 0)
+  echo "  rgb=$N_RGB sem=$N_SEM traj=$N_TRAJ"
+
+  # Emit rectified_calib.txt for Phase 3.6 stereo anchor (mirrors DDS-SLAM)
+  if [ ! -f "$STAGED/rectified_calib.txt" ]; then
+    python - <<PYEOF
+import yaml
+with open('$RAW/intrinsics.yaml') as f: intr = yaml.safe_load(f)
+cam = intr['camera']; stereo = intr['stereo']
+with open('$STAGED/rectified_calib.txt', 'w') as f:
+    f.write(f"fx {cam['fx']}\n")
+    f.write(f"fy {cam['fy']}\n")
+    f.write(f"cx {cam['cx']}\n")
+    f.write(f"cy {cam['cy']}\n")
+    f.write(f"baseline_m {stereo['baseline_m']}\n")
+PYEOF
+  fi
+
+  # --------------------------------------------------------------------------
+  # PHASE 3 -- MoGe-2 depth generation
+  # --------------------------------------------------------------------------
+  phase "3.$KEY" "MoGe-2 depth gen ($FRAMES frames at 1280x720)"
+  EXPECTED=$FRAMES
+  ACTUAL=0
+  [ -d "$STAGED/depth" ] && ACTUAL=$(ls "$STAGED/depth"/*.png 2>/dev/null | wc -l)
+  if [ -f "$STAGED/depth/.DONE" ] && [ "$ACTUAL" -ge "$EXPECTED" ]; then
+    echo "  depth/ complete ($ACTUAL/$EXPECTED) -- skip"
+  else
+    ensure_moge || exit 5
+    cd "$STAGED"
+    mkdir -p _moge_in _moge_npy depth.tmp
+    for f in rgb/rgb_*.png; do
+      fid=$(basename "$f" | sed 's/rgb_//; s/.png//')
+      [ -L "_moge_in/${fid}-left.png" ] || ln -sf "$PWD/$f" "_moge_in/${fid}-left.png"
+    done
+    echo "  symlinks: $(ls _moge_in/ | wc -l)"
+    python /content/sni-slam/Addons/depth/generate_depth_moge.py \
+      --rgb _moge_in --out _moge_npy \
+      --temporal_window 1 --depth_scale 10000 --max_depth_m 5.0 \
+      || { echo "FATAL: MoGe gen failed"; exit 5; }
+    python - <<'PYEOF'
+import numpy as np, cv2, glob, os
+n_in = sorted(glob.glob('_moge_npy/*-left_depth.npy'))
+written = 0
+for p in n_in:
+    fid = os.path.basename(p).split('-')[0]
+    out = f'depth.tmp/depth_{fid}.png'
+    if os.path.exists(out): continue
+    d = np.load(p).astype(np.float32)
+    cv2.imwrite(out, np.clip(d, 0, 65535).astype(np.uint16))
+    written += 1
+print(f'npy->png wrote {written}')
+PYEOF
+    PNG=$(ls depth.tmp/*.png 2>/dev/null | wc -l)
+    [ "$PNG" -ge "$EXPECTED" ] || { echo "FATAL: depth count $PNG < $EXPECTED"; cd "$REPO_ROOT"; exit 5; }
+    rm -rf depth && mv depth.tmp depth
+    sync; touch depth/.DONE; sync
+    rm -rf _moge_in _moge_npy
+    cd "$REPO_ROOT"
+  fi
+  N_D=$(ls "$STAGED/depth"/*.png 2>/dev/null | wc -l)
+  echo "  depth ready: $N_D files (depth_NNNNNN.png convention)"
+
+  # --------------------------------------------------------------------------
+  # PHASE 3.6 -- stereo anchor + in-place depth rescale (SNI-SLAM has no
+  # sc_factor knob; we rescale on disk to maintain png_depth_scale=10000)
+  # --------------------------------------------------------------------------
+  phase "3.6.$KEY" "stereo anchor calibration + depth rescale if needed"
+  if [ -f "$STAGED/.sc_factor_applied" ]; then
+    echo "  sc_factor already applied (cached)"
+  else
+    python - <<PYEOF
+import cv2, numpy as np, os, sys, glob, json
+STAGED = '$STAGED'
+
+# Read rectified calibration
+calib = {}
+with open(f'{STAGED}/rectified_calib.txt') as f:
+    for line in f:
+        k, v = line.strip().split()
+        calib[k] = float(v)
+baseline_m   = calib['baseline_m']
+fx_rectified = calib['fx']
+print(f'  baseline    : {baseline_m*1000:.4f} mm')
+print(f'  fx rectified: {fx_rectified:.4f} px')
+
+# Frame 0 (SNI-SLAM consumes from idx 0)
+left_path  = f'{STAGED}/rgb/rgb_000000.png'
+right_path = f'{RAW}/rgbright/frame_{$(printf "%06d" 0).png'  # raw RIGHT not rectified-paired
+# SNI-SLAM preprocess only rectifies LEFT; RIGHT not staged.  Use raw right
+# (intrinsics.yaml says rgb/ + rgbright/ are pre-rectification, rectifying
+# right requires applying ecm_map_right_x/y).  Re-rectify right here.
+PYEOF
+    # NB: SNI-SLAM preprocess only rectifies LEFT.  For SGBM we'd need the
+    # rectified RIGHT.  Cheap option: skip Phase 3.6 stereo anchor on SNI-SLAM
+    # for tonight and rely on DDS-SLAM's per-snippet sc_factor (we already
+    # computed it on the same data).  Reuse the sc_factor that DDS-SLAM wrote.
+    DDS_SCF=/content/DDS-SLAM/data/CRCD/${NAME}/.sc_factor
+    if [ -f "$DDS_SCF" ]; then
+      SC_FACTOR=$(cat "$DDS_SCF")
+      echo "  reusing DDS-SLAM-computed sc_factor: $SC_FACTOR"
+    else
+      SC_FACTOR=1.0
+      echo "  no DDS-SLAM .sc_factor cache; using sc_factor=1.0 (no rescale)"
+    fi
+
+    APPLY=$(python -c "
+import math
+s = $SC_FACTOR
+print('1' if abs(math.log(s)) > 0.1 else '0')")
+    if [ "$APPLY" = "1" ]; then
+      echo "  sc_factor $SC_FACTOR is >10% off 1.0 -- rescaling depth PNGs in place"
+      python - <<PYEOF
+import cv2, numpy as np, glob, os
+SC = $SC_FACTOR
+files = sorted(glob.glob('$STAGED/depth/depth_*.png'))
+n = 0
+for p in files:
+    d = cv2.imread(p, cv2.IMREAD_UNCHANGED).astype(np.float32) * SC
+    cv2.imwrite(p, np.clip(d, 0, 65535).astype(np.uint16))
+    n += 1
+print(f'  rescaled {n} depth PNGs by factor {SC:.4f}')
+PYEOF
+    else
+      echo "  sc_factor $SC_FACTOR within 10% of 1.0 -- no rescale needed"
+    fi
+    echo "$SC_FACTOR" > "$STAGED/.sc_factor_applied"
+  fi
+
+  # --------------------------------------------------------------------------
+  # PHASE 4 -- motion profile sanity (non-blocking)
+  # --------------------------------------------------------------------------
+  phase "4.$KEY" "GT motion profile sanity"
+  python - <<PYEOF
+import numpy as np
+rows = []
+with open('$STAGED/traj.txt') as f:
+    for line in f:
+        v = line.strip().split()
+        if not v: continue
+        try:
+            arr = np.array(list(map(float, v)))
+            if arr.size >= 12:
+                # First 12 numbers are 3x4 (row-major flatten) c2w
+                t = arr[:12].reshape(3, 4)[:3, 3]
+                rows.append(t)
+        except Exception:
+            pass
+xyz = np.array(rows)
+if len(xyz) < 2:
+    print('  WARN: too few traj rows')
+else:
+    d = np.linalg.norm(np.diff(xyz, axis=0), axis=1) * 1000
+    print(f'  GT poses    : {len(xyz)}')
+    print(f'  extent (mm) : x={(xyz[:,0].max()-xyz[:,0].min())*1000:.2f}  '
+          f'y={(xyz[:,1].max()-xyz[:,1].min())*1000:.2f}  '
+          f'z={(xyz[:,2].max()-xyz[:,2].min())*1000:.2f}')
+    print(f'  total path  : {d.sum():.2f} mm')
+    print(f'  per-frame   : median={np.median(d):.4f}  max={d.max():.4f} mm/f')
+    active = d > 0.001
+    print(f'  active frac : {100*active.mean():.1f}%')
+    if active.sum() > 0:
+        am = np.median(d[active])
+        print(f'  active median: {am:.4f} mm/f  ({am/1.0:.2f}x noise floor)')
+        if am < 0.5:
+            print(f'  SENTINEL: active median < 0.5 mm/f -- sub-SNR')
+PYEOF
+
+  # --------------------------------------------------------------------------
+  # PHASE 5 -- SNI-SLAM run
+  # --------------------------------------------------------------------------
+  phase "5.$KEY" "SNI-SLAM run.py --config $CONFIG"
+  if [ -f "$OUTPUT/ckpts" ] && ls "$OUTPUT/ckpts/"*.tar >/dev/null 2>&1; then
+    echo "  ckpt already present -- skipping SLAM"
+  else
+    T0=$(date +%s)
+    cd "$REPO_ROOT"
+    if ! python run.py "$CONFIG"; then
+      echo "  $KEY SLAM crashed; continuing to next snippet"
+      echo "FAILED_SLAM_$KEY" >> "$DRIVE_ROOT/_failures.log"
+      continue
+    fi
+    echo "  $KEY SLAM elapsed: $(( ($(date +%s) - T0) / 60 )) min"
+  fi
+
+  # --------------------------------------------------------------------------
+  # PHASE 6 -- eval: extended trajectory metrics + render PSNR/SSIM/LPIPS + Depth L1
+  # --------------------------------------------------------------------------
+  phase "6.$KEY" "eval (extended ATE + render + Depth L1)"
+
+  # Extended trajectory metrics (Sim3 + est_path/GT_path + per-axis Pearson)
+  python src/tools/eval_traj_extended.py "$CONFIG" \
+    --csv "$DRIVE_ROOT/_traj_summary.csv" \
+    --name "$KEY" 2>&1 | tee "$DRIVE_DST/extended_metrics.txt" || true
+
+  # Render eval (PSNR/SSIM/LPIPS)
+  if [ -d "$OUTPUT/rendered" ] || ls "$OUTPUT"/*.png >/dev/null 2>&1; then
+    RENDER_DIR=$([ -d "$OUTPUT/rendered" ] && echo "$OUTPUT/rendered" || echo "$OUTPUT")
+    python Addons/eval/eval_rendering.py \
+      --gt_dir "$STAGED/rgb" \
+      --render_dir "$RENDER_DIR" \
+      --name "$KEY" \
+      --output_csv "$DRIVE_DST/render_eval.csv" \
+      --summary_csv "$DRIVE_ROOT/_render_summary.csv" \
+      --sequence "CRCD (${NAME})" 2>&1 | tee "$DRIVE_DST/render_eval.txt" || \
+      echo "  render eval failed"
+  else
+    echo "  no rendered/ dir — skip render eval"
+  fi
+
+  # Depth L1 (recon metric) — requires GT mesh (not available for CRCD;
+  # SNI-SLAM Depth L1 protocol is mesh-vs-mesh).  Skip with note.
+  echo "  Depth L1: skipped (no GT mesh for CRCD; would require generating one)" \
+    | tee -a "$DRIVE_DST/extended_metrics.txt"
+
+  # --------------------------------------------------------------------------
+  # PHASE 7 -- ship to Drive
+  # --------------------------------------------------------------------------
+  phase "7.$KEY" "ship to Drive"
+  if [ ! -f "$DRIVE_DST/payload.tgz" ] && [ -d "$OUTPUT" ]; then
+    tar czf "$DRIVE_DST/payload.tgz.partial" \
+      -C "$OUTPUT" . 2>/dev/null
+    mv "$DRIVE_DST/payload.tgz.partial" "$DRIVE_DST/payload.tgz"
+  fi
+  mark_done "$DRIVE_DST"
+  echo "## $KEY complete"
+done
+
+# ============================================================================
+# PHASE 8 -- combined 4-snippet summary
+# ============================================================================
+phase 8 "combined summary"
+COMBINED=$DRIVE_ROOT/COMBINED_SUMMARY.txt
+{
+  echo "=== SNI-SLAM CRCD 4-snippet preliminary ($(date -Iseconds)) ==="
+  echo ""
+  if [ -f "$DRIVE_ROOT/_traj_summary.csv" ]; then
+    echo "--- trajectory metrics (csv) ---"
+    cat "$DRIVE_ROOT/_traj_summary.csv"
+  fi
+  echo ""
+  if [ -f "$DRIVE_ROOT/_render_summary.csv" ]; then
+    echo "--- render quality (csv) ---"
+    cat "$DRIVE_ROOT/_render_summary.csv"
+  fi
+  echo ""
+  echo "Per-snippet payloads:"
+  for ROW in "${SNIPPETS[@]}"; do
+    read -r KEY _ _ _ _ <<< "$ROW"
+    echo "  $DRIVE_ROOT/$KEY/payload.tgz"
+  done
+} | tee "$COMBINED"
+echo ""
+echo "=== done $(date -Iseconds) ==="
+echo "Log:     $LOG"
+echo "Summary: $COMBINED"

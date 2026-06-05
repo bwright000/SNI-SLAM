@@ -270,6 +270,9 @@ PYEOF
   [ -f "$STAGED/.sc_factor_applied" ] && SCF_APPLIED_VAL=$(cat "$STAGED/.sc_factor_applied" 2>/dev/null)
   SCF_EXPECTED_VAL=""
   [ -f "$STAGED/.sc_factor" ] && SCF_EXPECTED_VAL=$(cat "$STAGED/.sc_factor")
+  # Always export SC_FACTOR for downstream Phase 3.7 / 5 / 6.  Use the
+  # expected value if present; the if/else below handles application logic.
+  SC_FACTOR="${SCF_EXPECTED_VAL:-1.0}"
   if [ -n "$SCF_APPLIED_VAL" ] && [ -n "$SCF_EXPECTED_VAL" ] && \
      [ "$(python -c "print(abs(float('$SCF_APPLIED_VAL') - float('$SCF_EXPECTED_VAL')) < 0.001)")" = "True" ]; then
     echo "  sc_factor already applied (cached: $SCF_APPLIED_VAL)"

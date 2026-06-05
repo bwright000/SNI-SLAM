@@ -56,6 +56,14 @@ def main():
     parser.add_argument('--skip', type=int, default=1, help='Render every N-th frame')
     parser.add_argument('--max_frames', type=int, default=None)
     parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--use_gt_poses', action='store_true',
+                        help='Render at GT poses instead of estimated.  Sanity ablation only — '
+                             'in normal use, estimated poses are correct (training was at estimated).')
+    parser.add_argument('--png', action='store_true',
+                        help='Save RGB as lossless PNG instead of JPEG quality 90.  ~1 dB PSNR ceiling lift.')
+    parser.add_argument('--ignore_scaled_config', action='store_true',
+                        help='Force-use the passed config even if a scaled_config.yaml sibling exists. '
+                             'Default is to PREFER the scaled config (Phase 3.7 truncation/joint_opt override).')
     args = parser.parse_args()
 
     # Ensure repo root on sys.path
@@ -67,7 +75,31 @@ def main():
     from src.utils.datasets import get_dataset
     from src.utils.Renderer import Renderer
 
-    cfg = config.load_config(args.config, 'configs/SNI-SLAM.yaml')
+    # CRITICAL: prefer scaled_config.yaml if it exists alongside the input data.
+    # Phase 3.7 of run_crcd_4snippets.sh writes scaled_config.yaml with the
+    # sc_factor-scaled truncation (e.g. 0.06 -> 0.010 for CRCD).  If the
+    # renderer reads the BASE config, ray sampling uses 6x too-wide truncation
+    # -> dim/blurry renders.  Workflow woufta628 (2026-06-05) identified this
+    # as the single credible viz-adjacent fragility.
+    config_to_load = args.config
+    if not args.ignore_scaled_config:
+        # Look for scaled_config.yaml next to the data dir.  The data layout
+        # is: data/CRCD/<NAME>/scaled_config.yaml (set by Phase 3.7).
+        # If args.config IS already scaled_config.yaml, no change.
+        # Otherwise, infer the sibling location from data.input_folder.
+        cfg_probe = config.load_config(args.config, 'configs/SNI-SLAM.yaml')
+        data_dir = cfg_probe.get('data', {}).get('input_folder', '')
+        if data_dir:
+            scaled_cfg_path = os.path.join(data_dir, 'scaled_config.yaml')
+            if os.path.exists(scaled_cfg_path) and os.path.abspath(scaled_cfg_path) != os.path.abspath(args.config):
+                print(f'  AUTO-DETECTED scaled_config: {scaled_cfg_path}')
+                print(f'    (use --ignore_scaled_config to override)')
+                config_to_load = scaled_cfg_path
+
+    cfg = config.load_config(config_to_load, 'configs/SNI-SLAM.yaml')
+    print(f'Loaded config: {config_to_load}')
+    print(f'  truncation        : {cfg["model"]["truncation"]:.5f}')
+    print(f'  joint_opt_cam_lr  : {cfg["mapping"].get("joint_opt_cam_lr", "n/a")}')
     output_root = cfg['data']['output']
 
     # Auto-detect ckpt
@@ -141,8 +173,16 @@ def main():
         [p.to(device) for p in ckpt['s_planes_yz']],
     )
     est_c2w_list = ckpt['estimate_c2w_list'].to(device)
+    # Optional: render at GT poses (sanity ablation)
+    if args.use_gt_poses:
+        if 'gt_c2w_list' not in ckpt:
+            print('FATAL: --use_gt_poses but ckpt has no gt_c2w_list'); sys.exit(1)
+        gt_c2w_list = ckpt['gt_c2w_list'].to(device)
+        print(f'  USING GT POSES instead of estimated (sanity ablation)')
+        est_c2w_list = gt_c2w_list  # alias for the loop below
+
     n_img = ckpt['idx'] + 1
-    print(f'Ckpt has {n_img} frames; est_c2w_list shape: {tuple(est_c2w_list.shape)}')
+    print(f'Ckpt has {n_img} frames; pose list shape: {tuple(est_c2w_list.shape)}')
 
     # --- Renderer ---
     truncation = cfg['model']['truncation']
@@ -163,42 +203,61 @@ def main():
     frame_indices = list(range(0, max_n, args.skip))
     print(f'Rendering {len(frame_indices)} frames (skip={args.skip}) ...')
 
+    # Track skipped frames (workflow woufta628 recommended logging for transparency)
+    skipped = {'dataset_error': [], 'invalid_c2w': []}
+
+    rgb_ext = 'png' if args.png else 'jpg'
     for idx in tqdm(frame_indices, desc='render'):
         # Get GT depth (needed for guided ray sampling in render_img).
         # SNI-SLAM datasets.py:126 returns 5 values: (index, color, depth, pose, semantic)
         try:
             item = dataset[idx]
         except Exception as e:
-            print(f'  frame {idx}: dataset access failed: {e}'); continue
+            skipped['dataset_error'].append((idx, str(e))); continue
         gt_color = item[1]
         gt_depth = item[2]
         gt_depth = gt_depth.to(device).float()
         c2w = est_c2w_list[idx]
         if torch.isnan(c2w).any() or torch.isinf(c2w).any():
-            print(f'  frame {idx}: invalid c2w (NaN/Inf), skipping'); continue
+            skipped['invalid_c2w'].append(idx); continue
 
         with torch.no_grad():
             depth, color, _semantic = renderer.render_img(
                 all_planes, decoders, c2w, truncation, device, gt_depth=gt_depth
             )
 
-        # Save RGB (BGR for cv2)
+        # Save RGB (BGR for cv2).  PNG (lossless) if --png else JPEG quality 90.
         color_np = np.clip(color.cpu().numpy(), 0.0, 1.0)
         color_uint8 = (color_np * 255).astype(np.uint8)
         bgr = cv2.cvtColor(color_uint8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(out_dir, f'{idx:04d}.jpg'), bgr,
-                    [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if args.png:
+            cv2.imwrite(os.path.join(out_dir, f'{idx:04d}.png'), bgr,
+                        [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        else:
+            cv2.imwrite(os.path.join(out_dir, f'{idx:04d}.jpg'), bgr,
+                        [cv2.IMWRITE_JPEG_QUALITY, 90])
 
         # Save depth (uint16 at png_depth_scale)
         depth_np = depth.cpu().numpy()
         depth_uint16 = np.clip(depth_np * png_depth_scale, 0, 65535).astype(np.uint16)
         cv2.imwrite(os.path.join(depth_out_dir, f'{idx:04d}.png'), depth_uint16)
 
-    n_rgb = len([f for f in os.listdir(out_dir) if f.endswith('.jpg')])
+    n_rgb = len([f for f in os.listdir(out_dir) if f.endswith(f'.{rgb_ext}')])
     n_depth = len([f for f in os.listdir(depth_out_dir) if f.endswith('.png')])
     print(f'\nDone. rgb={n_rgb} depth={n_depth}')
-    print(f'  rendered RGB : {out_dir}/{{:04d}}.jpg')
+    print(f'  rendered RGB : {out_dir}/{{:04d}}.{rgb_ext}')
     print(f'  rendered depth: {depth_out_dir}/{{:04d}}.png')
+    if skipped['dataset_error']:
+        print(f'  SKIPPED {len(skipped["dataset_error"])} frames due to dataset errors:')
+        for i, e in skipped['dataset_error'][:5]:
+            print(f'    frame {i}: {e}')
+    if skipped['invalid_c2w']:
+        print(f'  SKIPPED {len(skipped["invalid_c2w"])} frames due to invalid c2w (NaN/Inf):')
+        print(f'    indices (first 20): {skipped["invalid_c2w"][:20]}')
+        # Sanity: how many in est_c2w_list are zero (uninitialized SLAM)?
+        zero_mask = torch.all(est_c2w_list.reshape(est_c2w_list.shape[0], -1) == 0, dim=1)
+        if zero_mask.any():
+            print(f'    NOTE: {zero_mask.sum().item()} poses in ckpt are all-zero (SLAM never ran them)')
 
 
 if __name__ == '__main__':

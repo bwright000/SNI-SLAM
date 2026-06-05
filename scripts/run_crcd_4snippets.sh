@@ -512,6 +512,37 @@ PYEOF
       -C "$OUTPUT" . 2>/dev/null
     mv "$DRIVE_DST/payload.tgz.partial" "$DRIVE_DST/payload.tgz"
   fi
+
+  # Also extract est_c2w_data.txt from the ckpt (DDS-SLAM-style flat 12-float
+  # per row) so generate_video.py can build the 6-panel video without needing
+  # to re-load the ckpt.  Use --skip_existing so this is idempotent.
+  if [ -f "$OUTPUT/ckpts" ] || ls "$OUTPUT/ckpts/"*.tar >/dev/null 2>&1; then
+    CKPT=$(ls -t "$OUTPUT/ckpts/"*.tar 2>/dev/null | head -1)
+    if [ -n "$CKPT" ] && [ ! -f "$OUTPUT/est_c2w_data.txt" ]; then
+      python - <<PYEOF
+import torch
+ckpt = torch.load('$CKPT', map_location='cpu')
+est = ckpt['estimate_c2w_list'].cpu().numpy()
+with open('$OUTPUT/est_c2w_data.txt', 'w') as f:
+    for i in range(est.shape[0]):
+        flat = est[i, :3, :4].flatten()
+        f.write(' '.join(f'{v:.10f}' for v in flat) + '\n')
+print(f'  wrote {est.shape[0]} poses to est_c2w_data.txt')
+PYEOF
+    fi
+  fi
+
+  # Ship the inputs needed for 6-panel video generation (rectified RGB input,
+  # MoGe-rescaled depth input, traj.txt).  Tiny relative to payload.tgz and
+  # makes the video pipeline reproducible from Drive alone.
+  if [ -d "$STAGED" ] && [ ! -f "$DRIVE_DST/inputs.tgz" ]; then
+    tar czf "$DRIVE_DST/inputs.tgz.partial" \
+      -C "$STAGED" \
+      rgb depth semantic_class traj.txt scaled_config.yaml .sc_factor 2>/dev/null
+    mv "$DRIVE_DST/inputs.tgz.partial" "$DRIVE_DST/inputs.tgz" 2>/dev/null \
+      || echo "  WARN: inputs.tgz ship failed (some files missing)"
+  fi
+
   mark_done "$DRIVE_DST"
   echo "## $KEY complete"
 done

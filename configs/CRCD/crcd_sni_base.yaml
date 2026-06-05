@@ -82,6 +82,12 @@ mapping:
   keyframe_every: 5    # match DDS-SLAM keyframe_every=5 (paper k=5 StereoMIS)
   mapping_window_size: 5
   joint_opt_cam_lr: 0.0001   # bring in line with tracker lr_T fix
+  lr:
+    # SNI-SLAM.yaml base already sets decoders_lr/planes_lr/c_planes_lr,
+    # but fusion_lr is added only in replica.yaml — must be set here too
+    # or Mapper.py:323 KeyError on first mapping iter.  Same value as
+    # replica.yaml (semantic feature fusion lr, unrelated to pose lr).
+    fusion_lr: 3.0e-3
 
 cam:
   H: 720

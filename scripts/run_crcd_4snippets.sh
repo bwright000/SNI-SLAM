@@ -43,6 +43,10 @@ CRCD_DRIVE_ROOT=/content/drive/MyDrive/Datasets/CRCD-Published
 CALIB_PKL=$CRCD_DRIVE_ROOT/cam_calib/ECM_STEREO_1280x720_L2R_calib_data_opencv.pkl
 DINOV2_PTH=/content/sni-slam/seg/dinov2_replica.pth
 REPO_ROOT=/content/sni-slam
+# Drive cache for MoGe input depth + sc_factor sentinel.  Workflow w7imqnt4t
+# chose this for atomicity (PNG + sc_factor travel together) and idempotency
+# (skip MoGe regen if DDS-SLAM already produced it).
+DRIVE_CACHE_ROOT=/content/drive/MyDrive/Datasets/CRCD-Published-MoGe-2
 
 # Snippet table: key episode snippet_id slam_config frames
 SNIPPETS=(
@@ -188,8 +192,28 @@ PYEOF
   EXPECTED=$FRAMES
   ACTUAL=0
   [ -d "$STAGED/depth" ] && ACTUAL=$(ls "$STAGED/depth"/*.png 2>/dev/null | wc -l)
+  # Drive cache pre-check (workflow w7imqnt4t):  rehydrate MoGe + sc_factor
+  # from the published cache before regenerating.  PNGs need to be renamed
+  # to SNI-SLAM's depth_NNNNNN.png convention (DDS-SLAM uses NNNNNN.png).
+  DRIVE_DEPTH_CACHE=$DRIVE_CACHE_ROOT/$EP/snippet_$SID/depth
+  if [ ! -f "$STAGED/depth/.DONE" ] && [ -d "$DRIVE_DEPTH_CACHE" ]; then
+    CACHE_PNG=$(ls "$DRIVE_DEPTH_CACHE"/*.png 2>/dev/null | wc -l)
+    if [ "$CACHE_PNG" -ge "$EXPECTED" ] && [ -f "$DRIVE_DEPTH_CACHE/.sc_factor" ]; then
+      echo "  rehydrating MoGe from cache: $DRIVE_DEPTH_CACHE ($CACHE_PNG PNGs)"
+      mkdir -p "$STAGED/depth"
+      for SRC in "$DRIVE_DEPTH_CACHE"/*.png; do
+        FID=$(basename "$SRC" .png)
+        DST="$STAGED/depth/depth_${FID}.png"
+        [ -f "$DST" ] || cp "$SRC" "$DST"
+      done
+      cp "$DRIVE_DEPTH_CACHE/.sc_factor" "$STAGED/.sc_factor"
+      sync; touch "$STAGED/depth/.DONE"; sync
+      ACTUAL=$(ls "$STAGED/depth"/*.png 2>/dev/null | wc -l)
+      echo "  rehydrated $ACTUAL renamed PNGs + sc_factor=$(cat "$STAGED/.sc_factor")"
+    fi
+  fi
   if [ -f "$STAGED/depth/.DONE" ] && [ "$ACTUAL" -ge "$EXPECTED" ]; then
-    echo "  depth/ complete ($ACTUAL/$EXPECTED) -- skip"
+    echo "  depth/ complete ($ACTUAL/$EXPECTED) -- skip MoGe gen"
   else
     ensure_moge || exit 5
     cd "$STAGED"
@@ -260,13 +284,21 @@ PYEOF
     # rectified RIGHT.  Cheap option: skip Phase 3.6 stereo anchor on SNI-SLAM
     # for tonight and rely on DDS-SLAM's per-snippet sc_factor (we already
     # computed it on the same data).  Reuse the sc_factor that DDS-SLAM wrote.
+    # Lookup order: local Colab DDS cache -> Drive published cache -> default 1.0
     DDS_SCF=/content/DDS-SLAM/data/CRCD/${NAME}/.sc_factor
-    if [ -f "$DDS_SCF" ]; then
+    DRIVE_SCF=$DRIVE_CACHE_ROOT/$EP/snippet_$SID/depth/.sc_factor
+    if [ -f "$STAGED/.sc_factor" ]; then
+      SC_FACTOR=$(cat "$STAGED/.sc_factor")
+      echo "  reusing sc_factor from Phase 3 rehydration: $SC_FACTOR"
+    elif [ -f "$DDS_SCF" ]; then
       SC_FACTOR=$(cat "$DDS_SCF")
-      echo "  reusing DDS-SLAM-computed sc_factor: $SC_FACTOR"
+      echo "  reusing DDS-SLAM local Colab sc_factor: $SC_FACTOR"
+    elif [ -f "$DRIVE_SCF" ]; then
+      SC_FACTOR=$(cat "$DRIVE_SCF")
+      echo "  reusing Drive-cached sc_factor: $SC_FACTOR"
     else
       SC_FACTOR=1.0
-      echo "  no DDS-SLAM .sc_factor cache; using sc_factor=1.0 (no rescale)"
+      echo "  WARN: no .sc_factor cache found anywhere; using 1.0 (uncalibrated!)"
     fi
 
     APPLY=$(python -c "

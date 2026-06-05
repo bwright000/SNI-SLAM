@@ -164,11 +164,14 @@ def main():
     print(f'Rendering {len(frame_indices)} frames (skip={args.skip}) ...')
 
     for idx in tqdm(frame_indices, desc='render'):
-        # Get GT depth (needed for guided ray sampling in render_img)
+        # Get GT depth (needed for guided ray sampling in render_img).
+        # SNI-SLAM datasets.py:126 returns 5 values: (index, color, depth, pose, semantic)
         try:
-            _, gt_color, gt_depth, _ = dataset[idx]
+            item = dataset[idx]
         except Exception as e:
             print(f'  frame {idx}: dataset access failed: {e}'); continue
+        gt_color = item[1]
+        gt_depth = item[2]
         gt_depth = gt_depth.to(device).float()
         c2w = est_c2w_list[idx]
         if torch.isnan(c2w).any() or torch.isinf(c2w).any():

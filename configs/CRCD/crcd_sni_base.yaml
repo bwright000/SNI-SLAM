@@ -42,8 +42,13 @@
 #     full F2 fix via static-frame gate deferred to code change)
 #   - rendering.{n_stratified, n_importance, perturb, learnable_beta}: inherit
 #   - mapping.keyframe_every = 4, mapping_window_size = 5
-#   - planes_res / c_planes_res / s_planes_res: inherit (tri-plane resolution
-#     not directly comparable to DDS-SLAM's hash grid; SNI-SLAM defaults stand)
+#
+# Knobs CORRECTED 2026-06-05 (workflow w5k5n8zma audit found major issues):
+#   - planes_res / c_planes_res / s_planes_res: SCALED from Replica (10m
+#     scenes) to CRCD (0.21m bound).  Original inherited values gave ~0.9
+#     coarse cells / 3.5 fine cells per axis on CRCD — 25-46x undersampling.
+#     New values produce ~20+ cells/axis (matching Replica's effective density).
+#   - bound_dividable: 0.24 (Replica) -> 0.01 (CRCD).  Must divide bound exactly.
 #
 # Per-snippet inheritors override only: mapping.bound, data.input_folder,
 # data.output, sc_factor (written by Phase 1.6 stereo anchor calibration in
@@ -101,16 +106,34 @@ cam:
 
 model:
   c_dim: 16            # paper-matched (refuted "32→16" hypothesis; this stays)
-  truncation: 0.06     # surgical-close-up safe; DDS-SLAM uses 0.1 but CRCD
-                       # 0.06m scene = 100% coverage; 0.06 here = ~100% too
-                       # because SNI-SLAM truncation interpretation differs.
-                       # Keeping default until empirically tuned.
+  truncation: 0.06     # NOTE 2026-06-05: Phase 3.7 in runbook now scales this
+                       # by sc_factor at runtime (-> ~0.01m for CRCD scenes).
+                       # The 0.06m value here is the unscaled "anchor" used
+                       # before Phase 3.7's override; if running run.py
+                       # directly without the runbook, set truncation: 0.01
+                       # manually for CRCD-scale data.
   hidden_dim: 32       # paper-matched
   fused_hidden_dim: 16
   sem_hidden_dim: 256
   cnn:
     n_classes: 4       # CRCD: bg / Liver / Gallbladder / Tool
     pretrained_model_path: 'seg/dinov2_replica.pth'
+
+# CRCD-scaled tri-plane resolution.  Critical fix per workflow w5k5n8zma:
+# inherited Replica values (coarse=0.24m, fine=0.06m) on CRCD's 0.21m bound
+# gave <1 coarse cell / 3.5 fine cells per axis — 25-46x undersampling.
+# These values produce ~20+ cells per axis (matching Replica's effective
+# density on its 10m scenes).
+planes_res:
+  coarse: 0.04
+  fine: 0.005
+  bound_dividable: 0.01
+c_planes_res:
+  coarse: 0.04
+  fine: 0.003
+s_planes_res:
+  coarse: 0.04
+  fine: 0.003
 
 func:
   use_gt_semantic: True

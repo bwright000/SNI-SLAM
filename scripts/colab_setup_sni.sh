@@ -243,11 +243,9 @@ for S in $SCENES; do scene_ready "$S" || have_all=0; done
 if [ "$have_all" = "1" ]; then
   echo "  all 8 scenes already present at $DATA_TARGET — skipping fetch"
 elif [ "$DRIVE_OK" = "1" ] && [ -d "$DRIVE_DATA_DIR/replica" ] && \
-     [ -f "$DRIVE_DATA_DIR/replica/office_4/traj.txt" ] && \
-     [ ! -f "$DRIVE_ROOT/Datasets/Replica/Replica.zip" ] && \
-     ! ls -d "$DRIVE_ROOT/Datasets/Replica"/*/ >/dev/null 2>&1; then
-  # NOTE: this vMAP cache is SKIPPED when authors' Datasets/Replica is present
-  # (the next elif), so the authors' data takes precedence over the stale cache.
+     [ -f "$DRIVE_DATA_DIR/replica/office_4/traj.txt" ]; then
+  # vMAP cache = the data with rendered SEMANTICS that SNI requires. The plain
+  # NICE-SLAM Datasets/Replica.zip has NO semantics, so vMAP is preferred for SNI.
   echo "  restoring 8 scenes from Drive cache: $DRIVE_DATA_DIR/replica"
   cp -r "$DRIVE_DATA_DIR/replica/"* "$DATA_TARGET/" 2>/dev/null || true
 elif [ "$DRIVE_OK" = "1" ] && { [ -f "$DRIVE_ROOT/Datasets/Replica/Replica.zip" ] || ls -d "$DRIVE_ROOT/Datasets/Replica"/*/ >/dev/null 2>&1; }; then

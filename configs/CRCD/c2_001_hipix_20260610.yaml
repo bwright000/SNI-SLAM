@@ -1,0 +1,15 @@
+# C_2/001 — stage-3 pixel-density A/B (2026-06-10), higher-motion companion to c1.
+# Same density match as c1_001_hipix: 6000/3000 vs baseline 2048/1024 on 720x1280.
+# Compare render PSNR/SSIM/LPIPS + Sim3 ATE against baseline configs/CRCD/c2_001.yaml.
+# C_2/001 is the largest-motion CRCD snippet -> best tracking signal for the A/B.
+# OOM fallback: 4000/2000.
+inherit_from: configs/CRCD/c2_001.yaml
+
+mapping:
+  pixels: 6000
+
+tracking:
+  pixels: 3000
+
+data:
+  output: output/CRCD/c2_001_hipix_20260610/test

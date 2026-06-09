@@ -1,0 +1,27 @@
+# C_1/001 — stage-3 pixel-density A/B (2026-06-10)
+#
+# Tests the stage-1 audit finding: CRCD samples ~3x FEWER pixels per unit area
+# than our Replica baseline.  crcd_sni_base uses mapping 2048 / tracking 1024 on
+# a 720x1280 frame = ~0.24% / 0.12% of the edge-cropped (680x1240) pool, vs
+# Replica's 4000 / 2000 on 530x1050 = ~0.72% / 0.36%.  Depth-filtering is NOT the
+# cause (MoGe depth measured 0% zeros), so the lever is raw sampling density.
+#
+# This config DENSITY-MATCHES Replica: 6000 / 3000 -> ~0.71% / 0.36% on the CRCD
+# pool.  Compare render PSNR/SSIM/LPIPS + tracking against the baseline
+# configs/CRCD/c1_001.yaml (2048/1024); ONLY mapping.pixels / tracking.pixels /
+# output differ (deep-merge preserves bound/intrinsics/depth).
+#
+# OOM note: per-iteration VRAM scales with pixel count; the known SNI-SLAM OOM
+# (project_sni_slam_replica_stall) is cumulative keyframe RAM over ~2000 frames,
+# so a 360-frame snippet is safe.  If VRAM-bound on T4, drop to 4000 / 2000
+# (Replica absolute defaults, still ~2x current).
+inherit_from: configs/CRCD/c1_001.yaml
+
+mapping:
+  pixels: 6000
+
+tracking:
+  pixels: 3000
+
+data:
+  output: output/CRCD/c1_001_hipix_20260610/test

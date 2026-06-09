@@ -246,6 +246,47 @@ elif [ "$DRIVE_OK" = "1" ] && [ -d "$DRIVE_DATA_DIR/replica" ] && \
      [ -f "$DRIVE_DATA_DIR/replica/office_4/traj.txt" ]; then
   echo "  restoring 8 scenes from Drive cache: $DRIVE_DATA_DIR/replica"
   cp -r "$DRIVE_DATA_DIR/replica/"* "$DATA_TARGET/" 2>/dev/null || true
+elif [ "$DRIVE_OK" = "1" ] && { [ -f "$DRIVE_ROOT/Datasets/Replica/Replica.zip" ] || ls -d "$DRIVE_ROOT/Datasets/Replica"/*/ >/dev/null 2>&1; }; then
+  # AUTHORS' Replica data (preferred over vMAP — fixes the 2.08x reproduction gap).
+  # Robust to layout: SNI (rgb/,depth/,semantic_class/,traj.txt) OR NICE-SLAM
+  # (results/frame*.jpg + depth*.png + traj.txt); room_0 or room0 naming.
+  AR="$DRIVE_ROOT/Datasets/Replica"
+  echo "  [authors' Replica] staging from $AR (preferred over vMAP)"
+  python3 - "$AR" "$DATA_TARGET" "$SCENES" <<'PY'
+import sys, os, glob, zipfile, shutil
+ar, dst_root, scenes = sys.argv[1], sys.argv[2], sys.argv[3].split()
+src = ar
+zips = glob.glob(os.path.join(ar, '*.zip'))
+have_extracted = any(os.path.isdir(os.path.join(ar, s)) or os.path.isdir(os.path.join(ar, s.replace('_',''))) for s in scenes)
+if zips and not have_extracted:
+    ex = '/content/authors_replica'; os.makedirs(ex, exist_ok=True)
+    print(f'  extracting {os.path.basename(zips[0])} -> {ex}')
+    with zipfile.ZipFile(zips[0]) as z: z.extractall(ex)
+    src = ex
+def scene_root(scene):
+    for cand in (scene, scene.replace('_','')):
+        for h in glob.glob(os.path.join(src, '**', cand), recursive=True):
+            if os.path.isdir(h) and (os.path.isdir(os.path.join(h,'rgb')) or os.path.isdir(os.path.join(h,'results')) or os.path.exists(os.path.join(h,'traj.txt'))):
+                return h
+    return None
+for s in scenes:
+    root = scene_root(s)
+    if not root: print(f'  WARN {s}: NOT FOUND under {src}'); continue
+    d = os.path.join(dst_root, s); os.makedirs(d, exist_ok=True)
+    if os.path.isdir(os.path.join(root,'rgb')):
+        for sub in ('rgb','depth','semantic_class'):
+            if os.path.isdir(os.path.join(root,sub)): shutil.copytree(os.path.join(root,sub), os.path.join(d,sub), dirs_exist_ok=True)
+    elif os.path.isdir(os.path.join(root,'results')):
+        os.makedirs(os.path.join(d,'rgb'), exist_ok=True); os.makedirs(os.path.join(d,'depth'), exist_ok=True)
+        for f in glob.glob(os.path.join(root,'results','frame*.jpg')): shutil.copy(f, os.path.join(d,'rgb', os.path.basename(f)))
+        for f in glob.glob(os.path.join(root,'results','depth*.png')): shutil.copy(f, os.path.join(d,'depth', os.path.basename(f)))
+        if os.path.isdir(os.path.join(root,'semantic_class')): shutil.copytree(os.path.join(root,'semantic_class'), os.path.join(d,'semantic_class'), dirs_exist_ok=True)
+    for t in ('traj_w_c.txt','traj.txt'):
+        if os.path.exists(os.path.join(root,t)): shutil.copy(os.path.join(root,t), os.path.join(d,'traj.txt')); break
+    nrgb=len(glob.glob(os.path.join(d,'rgb','*'))); sem=os.path.isdir(os.path.join(d,'semantic_class')); tr=os.path.exists(os.path.join(d,'traj.txt'))
+    print(f'  {s}: rgb={nrgb} semantic_class={"yes" if sem else "NO(!)"}  traj={"yes" if tr else "NO(!)"}  root={root}')
+PY
+  if [ "$DRIVE_OK" = "1" ]; then mkdir -p "$DRIVE_DATA_DIR/replica"; cp -r "$DATA_TARGET/"* "$DRIVE_DATA_DIR/replica/" 2>/dev/null || true; fi
 else
   ZIP=/content/vmap.zip
   EXTRACT=/content/vmap_extract

@@ -100,11 +100,26 @@ render_eval_crcd(){   # $1 config-key  $2 output-dir  $3 staged-rgb  $4 seq-id  
     --sequence "CRCD ($seq)" 2>&1 | tee "$dst/render_eval.txt" || say "    WARN: eval_rendering $1 failed"
   cp -rn "$out/rendered" "$dst/rendered" 2>/dev/null || true
   cp -n "$out"/mesh/*culled*.ply "$dst/" 2>/dev/null || true
+  # 6-panel needs the RECTIFIED input frames the model saw (NOT raw F: frames) +
+  # input depth. render_all_frames_sni has no --save_gt, so ship the staged inputs.
+  cp -rn "$gt" "$dst/input_rgb" 2>/dev/null || true
+  [ -d "$(dirname "$gt")/depth" ] && cp -rn "$(dirname "$gt")/depth" "$dst/input_depth" 2>/dev/null || true
 }
 
 if [ -n "$CRCD_SNIPPETS" ]; then
   say "PHASE B: CRCD snippets = $CRCD_SNIPPETS  (baseline + hipix A/B)"
   mkdir -p "$DRIVE/crcd"
+  # CRCD RENDER FIX: tighten truncation 0.06 -> 0.01 for the ~0.2 m CRCD scene.
+  # run_crcd_overnight.sh (baseline) + direct run.py (hipix) do NOT apply
+  # run_crcd_4snippets.sh's Phase-3.7 trunc scaling, so the SLAM would render mushy
+  # at the 0.06 anchor (Mapper.py:125 reads config truncation directly). Session-local
+  # edit of the clone (commit keeps 0.06 anchor so run_crcd_4snippets stays correct).
+  python3 - <<'PY'
+import re
+p='configs/CRCD/crcd_sni_base.yaml'; t=open(p).read()
+t=re.sub(r'(\n\s*truncation:\s*)[0-9.]+', r'\g<1>0.01', t, count=1)
+open(p,'w').write(t); print('  [fix] crcd_sni_base truncation -> 0.01 (was 0.06)')
+PY
   for snip in $CRCD_SNIPPETS; do
     ID=$(crcd_id "$snip"); [ -n "$ID" ] || { say "  WARN: unknown snippet $snip"; continue; }
     STAGED=$REPO/data/CRCD/$ID; GT=$STAGED/rgb
@@ -131,3 +146,8 @@ say "          VIEW 3D LOCALLY: download that scene dir, then  python visualizer
 say "CRCD    : $DRIVE/crcd/{<ID>_baseline,<ID>_hipix}/{rendered,render_eval.csv}  + Sim3 via run_crcd_overnight"
 say "A/B     : compare _baseline vs _hipix render_eval.csv  -> does higher pixel density lift PSNR/SSIM/LPIPS?"
 if [ -f "$DRIVE/crcd/_render_summary.csv" ]; then say "summary:"; cat "$DRIVE/crcd/_render_summary.csv" | tee -a "$LOG"; fi
+
+# Close the runtime to stop compute (user goal). Disconnects this Colab session;
+# everything is already on Drive. Guarded so it no-ops outside Colab.
+say "=== ALL DONE — disconnecting Colab runtime to stop compute ==="
+python3 -c "from google.colab import runtime; runtime.unassign()" 2>/dev/null || say "(not in Colab / already free — stop the runtime manually to avoid charges)"

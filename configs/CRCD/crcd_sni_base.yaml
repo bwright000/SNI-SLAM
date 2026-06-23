@@ -75,13 +75,16 @@ tracking:
   ignore_edge_H: 20
   lr_T: 0.0001         # DDS-SLAM F1 fix (sub-SNR regime); 10x below paper text
   lr_R: 0.0001         # consistent with lr_T (both rotation + translation)
-  pixels: 1024         # match DDS-SLAM Q=1024
+  pixels: 3000         # "correct num of rays" (06-23): Replica-density on CRCD's
+                       # larger frames (hipix finding). Was 1024 (DDS-Q match =
+                       # ~3x undersample vs Replica; deliberate throttle, now lifted).
   iters: 10            # match DDS-SLAM CRCD tracking iter=10
   const_speed_assumption: True   # user-locked 2026-06-04
 
 mapping:
   every_frame: 5       # keyframe selection cadence (vs SNI-SLAM default 4)
-  pixels: 2048         # match DDS-SLAM Qg=Qt=2048
+  pixels: 6000         # "correct num of rays" (06-23): Replica-density (hipix).
+                       # Was 2048 (DDS-Qg match = ~3x undersample vs Replica).
   iters: 10            # REVERT from SNI-SLAM 15 → match DDS-SLAM CRCD
   iters_first: 200     # REVERT from SNI-SLAM 1000 → match DDS-SLAM CRCD
   keyframe_every: 5    # match DDS-SLAM keyframe_every=5 (paper k=5 StereoMIS)

@@ -98,6 +98,9 @@ ensure_moge() {
 # ============================================================================
 for ROW in "${SNIPPETS[@]}"; do
   read -r KEY EP SNIP CONFIG FRAMES <<< "$ROW"
+  # ONLY="c1_001" (or "c1_001 f3_007") restricts the batch to those snippets —
+  # used for the c1-focused baseline/DINOv3 A/B comparison.
+  if [ -n "${ONLY:-}" ] && [[ " $ONLY " != *" $KEY "* ]]; then continue; fi
   NAME=$(echo "$KEY" | tr '[:lower:]' '[:upper:]')   # e.g. c1_001 -> C1_001
 
   echo ""

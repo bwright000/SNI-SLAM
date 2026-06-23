@@ -80,6 +80,21 @@ else
   echo "FATAL: nvidia-smi not on PATH"; exit 1
 fi
 [ -f "$CALIB_PKL" ] || { echo "FATAL: calib_pkl missing at $CALIB_PKL"; exit 1; }
+# The published calib pkl is protocol-5 (saved by py3.8+); the sni env is py3.7
+# and pickle.load chokes ("unsupported pickle protocol: 5"). Re-dump it once to
+# protocol-2 via the Colab SYSTEM python (py3.10, reads proto-5), then point
+# preprocess at the downgraded copy. Cached at /content; idempotent.
+CALIB_P37=/content/calib_proto2.pkl
+if [ ! -f "$CALIB_P37" ]; then
+  SYSPY=/usr/bin/python3
+  "$SYSPY" - "$CALIB_PKL" "$CALIB_P37" <<'PY' || { echo "FATAL: calib pkl proto-5 -> proto-2 downgrade failed (system python missing numpy?)"; exit 1; }
+import sys, pickle
+with open(sys.argv[1], 'rb') as f: obj = pickle.load(f)
+with open(sys.argv[2], 'wb') as f: pickle.dump(obj, f, protocol=2)
+print(f"  calib pkl downgraded proto5->proto2 -> {sys.argv[2]}")
+PY
+fi
+CALIB_PKL="$CALIB_P37"
 [ -f "$DINOV2_PTH" ] || { echo "FATAL: dinov2 pretrained missing at $DINOV2_PTH (run colab_setup_sni.sh)"; exit 1; }
 [ -f "$REPO_ROOT/Addons/preprocess/preprocess_crcd_for_sni.py" ] || { echo "FATAL: preprocess missing"; exit 1; }
 [ -f "$REPO_ROOT/Addons/depth/generate_depth_moge.py" ] || { echo "FATAL: MoGe gen missing"; exit 1; }

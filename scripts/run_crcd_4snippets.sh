@@ -60,7 +60,15 @@ SNIPPETS=(
 # Pre-flight checks (run once)
 # ----------------------------------------------------------------------------
 phase 0 "pre-flight"
-[ -d /content/drive/MyDrive ] || { echo "FATAL: Drive not mounted"; exit 1; }
+# Self-activate the 'sni' conda env so the runbook works from a fresh shell —
+# every python below (run.py, MoGe, eval) needs sni's interpreter. Idempotent.
+if [ "${CONDA_DEFAULT_ENV:-}" != "sni" ]; then
+  # shellcheck disable=SC1091
+  source /opt/conda/etc/profile.d/conda.sh 2>/dev/null && conda activate sni 2>/dev/null \
+    && echo "  conda env -> sni (python $(python -c 'import sys;print(sys.version.split()[0])' 2>/dev/null))" \
+    || echo "  WARN: could not auto-activate 'sni'; run 'conda activate sni' first or expect python errors"
+fi
+[ -d /content/drive/MyDrive ] || { echo "FATAL: Drive not mounted (run drive.mount in a notebook cell first)"; exit 1; }
 if command -v nvidia-smi >/dev/null 2>&1; then
   GPU=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)
   echo "  GPU: $GPU"

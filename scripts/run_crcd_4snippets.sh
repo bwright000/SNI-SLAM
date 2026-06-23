@@ -111,12 +111,15 @@ else
   git fetch && git merge --ff-only origin/$(git rev-parse --abbrev-ref HEAD) || echo "  WARN: non-FF on remote, continuing"
 fi
 
+# MoGe-2 needs torch>=2 -> the py3.7/torch1.11 sni env CANNOT run it. Use the
+# Colab SYSTEM python (torch2 + CUDA) for depth gen; depth PNGs are env-agnostic.
+SYSPY=/usr/bin/python3
 ensure_moge() {
-  if ! python -c 'from moge.model.v2 import MoGeModel' 2>/dev/null; then
-    echo "  installing MoGe-2..."
-    pip install -q git+https://github.com/microsoft/MoGe.git huggingface_hub 2>&1 | tail -3
-    python -c 'from moge.model.v2 import MoGeModel' \
-      || { echo "FATAL: MoGe-2 not importable after install"; return 1; }
+  if ! "$SYSPY" -c 'from moge.model.v2 import MoGeModel' 2>/dev/null; then
+    echo "  installing MoGe-2 into the system python (torch2)..."
+    "$SYSPY" -m pip install -q git+https://github.com/microsoft/MoGe.git huggingface_hub 2>&1 | tail -3
+    "$SYSPY" -c 'from moge.model.v2 import MoGeModel' \
+      || { echo "FATAL: MoGe-2 not importable in system python after install"; return 1; }
   fi
 }
 
@@ -231,10 +234,13 @@ PYEOF
   # Drive cache pre-check (workflow w7imqnt4t):  rehydrate MoGe + sc_factor
   # from the published cache before regenerating.  PNGs need to be renamed
   # to SNI-SLAM's depth_NNNNNN.png convention (DDS-SLAM uses NNNNNN.png).
-  DRIVE_DEPTH_CACHE=$DRIVE_CACHE_ROOT/$EP/snippet_$SID/depth
+  DRIVE_DEPTH_CACHE=$DRIVE_CACHE_ROOT/$EP/$SNIP/depth   # was snippet_$SID ($SID never set)
   if [ ! -f "$STAGED/depth/.DONE" ] && [ -d "$DRIVE_DEPTH_CACHE" ]; then
     CACHE_PNG=$(ls "$DRIVE_DEPTH_CACHE"/*.png 2>/dev/null | wc -l)
-    if [ "$CACHE_PNG" -ge "$EXPECTED" ] && [ -f "$DRIVE_DEPTH_CACHE/.sc_factor" ]; then
+    # rehydrate if the cache has enough PNGs; .sc_factor optional (Phase 3.6 has
+    # the hardcoded per-snippet fallback) so a cache without it still rehydrates
+    # instead of triggering a MoGe regen (which needs torch2, not the sni env).
+    if [ "$CACHE_PNG" -ge "$EXPECTED" ]; then
       echo "  rehydrating MoGe from cache: $DRIVE_DEPTH_CACHE ($CACHE_PNG PNGs)"
       mkdir -p "$STAGED/depth"
       for SRC in "$DRIVE_DEPTH_CACHE"/*.png; do
@@ -242,10 +248,10 @@ PYEOF
         DST="$STAGED/depth/depth_${FID}.png"
         [ -f "$DST" ] || cp "$SRC" "$DST"
       done
-      cp "$DRIVE_DEPTH_CACHE/.sc_factor" "$STAGED/.sc_factor"
+      [ -f "$DRIVE_DEPTH_CACHE/.sc_factor" ] && cp "$DRIVE_DEPTH_CACHE/.sc_factor" "$STAGED/.sc_factor"
       sync; touch "$STAGED/depth/.DONE"; sync
       ACTUAL=$(ls "$STAGED/depth"/*.png 2>/dev/null | wc -l)
-      echo "  rehydrated $ACTUAL renamed PNGs + sc_factor=$(cat "$STAGED/.sc_factor")"
+      echo "  rehydrated $ACTUAL renamed PNGs (sc_factor=$(cat "$STAGED/.sc_factor" 2>/dev/null || echo 'Phase-3.6 fallback'))"
     fi
   fi
   if [ -f "$STAGED/depth/.DONE" ] && [ "$ACTUAL" -ge "$EXPECTED" ]; then
@@ -259,7 +265,7 @@ PYEOF
       [ -L "_moge_in/${fid}-left.png" ] || ln -sf "$PWD/$f" "_moge_in/${fid}-left.png"
     done
     echo "  symlinks: $(ls _moge_in/ | wc -l)"
-    python /content/sni-slam/Addons/depth/generate_depth_moge.py \
+    "$SYSPY" /content/sni-slam/Addons/depth/generate_depth_moge.py \
       --rgb _moge_in --out _moge_npy \
       --temporal_window 1 --depth_scale 10000 --max_depth_m 5.0 \
       || { echo "FATAL: MoGe gen failed"; exit 5; }

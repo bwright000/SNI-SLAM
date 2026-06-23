@@ -47,8 +47,13 @@ from tqdm import tqdm
 
 
 def load_stereo_maps(calib_pkl):
-    with open(calib_pkl, "rb") as f:
-        calib = pickle.load(f)
+    # .npz path: the runbook exports the rectify maps to a numpy-version-agnostic
+    # .npz when the source pkl is proto-5 / numpy>=2 (unreadable in the py3.7 env).
+    if calib_pkl.endswith(".npz"):
+        calib = np.load(calib_pkl)
+    else:
+        with open(calib_pkl, "rb") as f:
+            calib = pickle.load(f)
     return {
         "map_left_x": calib["ecm_map_left_x"],
         "map_left_y": calib["ecm_map_left_y"],

@@ -80,21 +80,25 @@ else
   echo "FATAL: nvidia-smi not on PATH"; exit 1
 fi
 [ -f "$CALIB_PKL" ] || { echo "FATAL: calib_pkl missing at $CALIB_PKL"; exit 1; }
-# The published calib pkl is protocol-5 (saved by py3.8+); the sni env is py3.7
-# and pickle.load chokes ("unsupported pickle protocol: 5"). Re-dump it once to
-# protocol-2 via the Colab SYSTEM python (py3.10, reads proto-5), then point
-# preprocess at the downgraded copy. Cached at /content; idempotent.
-CALIB_P37=/content/calib_proto2.pkl
-if [ ! -f "$CALIB_P37" ]; then
+# The published calib pkl is protocol-5 AND saved by numpy>=2 (Colab system
+# python), whose pickled ndarrays reference numpy._core -> the py3.7/numpy<2 sni
+# env can't unpickle it (proto-5 error, then "No module named 'numpy._core'").
+# Export the rectify maps via the SYSTEM python to a .npz; the .npy format is
+# stable across numpy 1.x<->2.x, so preprocess loads it fine in the sni env.
+# Cached at /content; idempotent.
+CALIB_NPZ=/content/calib_maps.npz
+if [ ! -f "$CALIB_NPZ" ]; then
   SYSPY=/usr/bin/python3
-  "$SYSPY" - "$CALIB_PKL" "$CALIB_P37" <<'PY' || { echo "FATAL: calib pkl proto-5 -> proto-2 downgrade failed (system python missing numpy?)"; exit 1; }
-import sys, pickle
-with open(sys.argv[1], 'rb') as f: obj = pickle.load(f)
-with open(sys.argv[2], 'wb') as f: pickle.dump(obj, f, protocol=2)
-print(f"  calib pkl downgraded proto5->proto2 -> {sys.argv[2]}")
+  "$SYSPY" - "$CALIB_PKL" "$CALIB_NPZ" <<'PY' || { echo "FATAL: calib pkl -> npz export failed (system python missing numpy?)"; exit 1; }
+import sys, pickle, numpy as np
+with open(sys.argv[1], 'rb') as f: c = pickle.load(f)
+keys = [k for k in ('ecm_map_left_x','ecm_map_left_y','ecm_map_right_x','ecm_map_right_y') if k in c]
+assert 'ecm_map_left_x' in keys and 'ecm_map_left_y' in keys, f"calib missing left maps; has {list(c)[:12]}"
+np.savez(sys.argv[2], **{k: np.asarray(c[k]) for k in keys})
+print(f"  calib maps -> {sys.argv[2]} (keys: {keys})")
 PY
 fi
-CALIB_PKL="$CALIB_P37"
+CALIB_PKL="$CALIB_NPZ"
 [ -f "$DINOV2_PTH" ] || { echo "FATAL: dinov2 pretrained missing at $DINOV2_PTH (run colab_setup_sni.sh)"; exit 1; }
 [ -f "$REPO_ROOT/Addons/preprocess/preprocess_crcd_for_sni.py" ] || { echo "FATAL: preprocess missing"; exit 1; }
 [ -f "$REPO_ROOT/Addons/depth/generate_depth_moge.py" ] || { echo "FATAL: MoGe gen missing"; exit 1; }

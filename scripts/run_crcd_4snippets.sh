@@ -143,7 +143,9 @@ for ROW in "${SNIPPETS[@]}"; do
   # seg variant for the DINOv3 A/B: gt (baseline GT masks) | dino (predicted DINOv3 seg, run B).
   # TAG keys OUTPUT + DRIVE_DST so baseline and B don't collide (staging is shared by NAME).
   SEG=${SEG:-gt}
-  TAG="$KEY"; [ "$SEG" != gt ] && TAG="${KEY}_${SEG}"
+  TAG="$KEY"
+  [ "$SEG" != gt ] && TAG="${TAG}_${SEG}"
+  [ "${QUALITY:-0}" = 1 ] && TAG="${TAG}_hq"   # render-quality sweep (Phase 3.7 injects the knobs)
   OUTPUT=/content/sni-slam/output/CRCD/${TAG}/test
   DRIVE_DST=$DRIVE_ROOT/$TAG
   mkdir -p "$DRIVE_DST"
@@ -473,6 +475,15 @@ override = {
 if os.environ.get('GTPOSE') == '1':
     override['func'] = {'use_gt_pose': True}
     print('  GTPOSE=1: func.use_gt_pose=True (map+render from GT poses — render-ceiling diagnostic)')
+if os.environ.get('QUALITY') == '1':
+    # render-quality sweep (load_config merges these recursively, keeping mapping.lr etc.):
+    #   finer surface sampling (blur) + denser/wider mapping coverage (dark spots) + finer field.
+    override['rendering'] = {'n_importance': 24}
+    override['mapping'] = {'pixels': 8000, 'iters': 25, 'iters_first': 1500, 'mapping_window_size': 10}
+    override['planes_res'] = {'fine': 0.003}
+    override['c_planes_res'] = {'fine': 0.002}
+    override['s_planes_res'] = {'fine': 0.002}
+    print('  QUALITY=1: n_importance 24 | mapping.pixels 8000 window 10 iters 25/1500 | planes_res fine 0.003/0.002')
 with open('$STAGED/scaled_config.yaml', 'w') as f:
     yaml.safe_dump(override, f, default_flow_style=None, sort_keys=False)
 print(f'  truncation: {trunc_old:.4f} -> {trunc_new:.5f} (× sc_factor {SC:.4f})')

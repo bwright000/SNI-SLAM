@@ -26,6 +26,13 @@
 inherit_from: configs/SNI-SLAM.yaml
 dataset: 'crcd'
 
+# CRCD is sub-SNR (GT motion ~0.11 mm/f << tracker noise floor): base lr_T/R 1e-3
+# overshoots the tiny motion -> the tracker drifts (METRIC-PROVEN: path-ratio 23x at
+# base 1e-3 vs 11x at 1e-4 on c1_001). The 10x-lower lr is a required CRCD change.
+tracking:
+  lr_T: 0.0001
+  lr_R: 0.0001
+
 cam:
   H: 720
   W: 1280

@@ -408,6 +408,11 @@ override = {
         'truncation': trunc_new,
     },
 }
+# GTPOSE=1 diagnostic: map AND render from GT poses (use_gt_pose makes
+# estimate_c2w == gt) -> isolates SNI's render ceiling from the tracker drift.
+if os.environ.get('GTPOSE') == '1':
+    override['func'] = {'use_gt_pose': True}
+    print('  GTPOSE=1: func.use_gt_pose=True (map+render from GT poses — render-ceiling diagnostic)')
 with open('$STAGED/scaled_config.yaml', 'w') as f:
     yaml.safe_dump(override, f, default_flow_style=None, sort_keys=False)
 print(f'  truncation: {trunc_old:.4f} -> {trunc_new:.5f} (× sc_factor {SC:.4f})')

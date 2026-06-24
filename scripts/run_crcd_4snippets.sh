@@ -436,13 +436,11 @@ PYEOF
   # Base truncation 0.06 m is ~60% of CRCD's ~0.10 m rescaled depth -> an over-thick
   # SDF band -> shallow gradient + over-smoothed surface (the soft renders). Scaling
   # (SC=0.17 -> 0.0102 m, ~Replica truncation:depth ratio) restores a sharp band.
-  # NB (2026-06-23): the earlier joint_opt_cam_lr=0 FREEZE is REMOVED -> joint BA
-  # returns to SNI base (0.001). The freeze was a workaround for pose drift whose
-  # ROOT CAUSE was the over-thick truncation (shallow SDF gradient -> optimizer
-  # slack); scaling truncation fixes that cause, so the freeze is no longer needed.
-  # If black/compressed renders recur, re-examine the cause (don't just re-freeze).
+  # NB (2026-06-24): joint_opt_cam_lr=0 FREEZE re-added. The un-frozen base config rendered
+  # WORSE (PSNR 9.6 vs the frozen 12.838); freezing joint BA stops pose drift smearing the map
+  # (combined with the restored low-iters config = fewer empty/black rays).
   # ----------------------------------------------------------------------------
-  phase "3.7.$KEY" "truncation scale to CRCD (joint BA = base)"
+  phase "3.7.$KEY" "truncation scale + freeze joint BA (best-render config)"
   python - <<PYEOF
 import os, yaml
 SC = $SC_FACTOR
@@ -469,6 +467,7 @@ override = {
     # TAG-keyed output so seg-variant A/B runs don't collide; full data block
     # (both keys) so it's robust whether the loader merges or replaces 'data'.
     'data': {'input_folder': orig['data']['input_folder'], 'output': '$OUTPUT'},
+    'mapping': {'joint_opt_cam_lr': 0.0},   # FREEZE joint BA (the 12.838 best-render config had it)
 }
 # GTPOSE=1 diagnostic: map AND render from GT poses (use_gt_pose makes
 # estimate_c2w == gt) -> isolates SNI's render ceiling from the tracker drift.
@@ -479,7 +478,7 @@ if os.environ.get('QUALITY') == '1':
     # render-quality sweep (load_config merges these recursively, keeping mapping.lr etc.):
     #   finer surface sampling (blur) + denser/wider mapping coverage (dark spots) + finer field.
     override['rendering'] = {'n_importance': 24}
-    override['mapping'] = {'pixels': 8000, 'iters': 25, 'iters_first': 1500, 'mapping_window_size': 10}
+    override['mapping'].update({'pixels': 8000, 'iters': 25, 'iters_first': 1500, 'mapping_window_size': 10})
     override['planes_res'] = {'fine': 0.003}
     override['c_planes_res'] = {'fine': 0.002}
     override['s_planes_res'] = {'fine': 0.002}
@@ -487,7 +486,7 @@ if os.environ.get('QUALITY') == '1':
 with open('$STAGED/scaled_config.yaml', 'w') as f:
     yaml.safe_dump(override, f, default_flow_style=None, sort_keys=False)
 print(f'  truncation: {trunc_old:.4f} -> {trunc_new:.5f} (× sc_factor {SC:.4f})')
-print(f"  joint_opt_cam_lr: base ({orig['mapping'].get('joint_opt_cam_lr')}) — freeze removed")
+print(f"  joint_opt_cam_lr: {orig['mapping'].get('joint_opt_cam_lr')} -> 0.0 (FROZEN — 12.838 best-render config)")
 print(f'  bound + traj.txt UNCHANGED')
 PYEOF
 

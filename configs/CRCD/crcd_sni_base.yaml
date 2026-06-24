@@ -1,37 +1,101 @@
-# CRCD base config for SNI-SLAM — MINIMAL.
+# CRCD preliminary batch config — SNI-SLAM port of DDS-SLAM paperfaith_lrfix.
 #
-# Philosophy (user 2026-06-23): run SNI-SLAM at its NATIVE config (configs/SNI-SLAM.yaml)
-# and change ONLY what CRCD physically requires. Earlier this file carried many
-# "match DDS-SLAM" deviations (tracking/mapping pixels, iters, iters_first, lr, keyframe
-# cadence) that throttled SNI's own optimisation and produced soft/under-converged renders.
-# Those are all REVERTED to base by simply not overriding them (they inherit SNI-SLAM.yaml).
+# Purpose: preliminary 4-snippet SNI-SLAM run on C_1/001, F_1/002, C_2/001,
+# F_3/007 for head-to-head comparison against DDS-SLAM on the SAME data.
 #
-# Per-snippet inheritors (c1_001.yaml etc.) add only: mapping.bound, marching_cubes_bound,
-# data.input_folder, data.output. The runbook's Phase 3.7 additionally scales model.truncation
-# by the per-snippet sc_factor at runtime (REQUIRED: base truncation 0.06 m is ~60% of CRCD's
-# ~0.10 m rescaled depth -> over-thick SDF band -> over-smooth surface; scaling restores SNI's
-# Replica-like truncation-to-depth ratio).
+# Built per workflow w0urnhiws synthesis (2026-06-04).  Applies the
+# DDS-SLAM lessons that map to SNI-SLAM architecture:
 #
-# What is KEPT here, and why each is REQUIRED for CRCD (not a tuning choice):
-#   - cam: CRCD rectified ECM-stereo intrinsics + MoGe png_depth_scale (base is Replica's).
-#   - planes_res/c_planes_res/s_planes_res/bound_dividable: base resolution targets ~10 m
-#     Replica scenes; CRCD's ~0.5 m bound would be 25-46x undersampled.
-#   - model.cnn.n_classes: CRCD has 4 classes (bg/Liver/Gallbladder/Tool), base has 52.
-#   - mapping.lr.fusion_lr: the root SNI-SLAM.yaml lr block lacks fusion_lr (it lives only in
-#     replica.yaml); Mapper.py KeyErrors without it.
-#   - func.use_gt_semantic: CRCD ships GT masks AND the base Replica seg head cannot predict
-#     CRCD's 4 classes, so GT seg is required for the baseline. (The predicted-DINOv3-seg run
-#     flips this to False with a CRCD seg head — that's the later B experiment.)
+# Deviations from SNI-SLAM.yaml base + replica.yaml inheritance:
+#
+# 1. dataset = 'crcd'  (registered in src/utils/datasets.py 2026-06-03)
+# 2. cam intrinsics: H=720, W=1200 → W=1280, fx=600 → 1096.6961889243337,
+#    cx/cy from CRCD ECM rectified.  Source: intrinsics.yaml in
+#    F:/Datasets/CRCD-Published/<EP>/snippet_<SID>/.
+#    13% focal-length error in the Replica defaults — catastrophic for CRCD.
+# 3. cam.png_depth_scale = 10000  (MoGe-2 convention; was 1000 in Replica).
+# 4. tracking.lr_T = 0.0001  (DDS-SLAM F1 catastrophic-flaw fix per
+#    project_lr_fix_breakthrough_20260429 BC0 → 39% StereoMIS ATE reduction).
+#    NOTE: this is 10x SMALLER than the paper's text 0.001.  Justification:
+#    CRCD sub-SNR regime (active median 0.115 mm/f vs ~1 mm tracker noise
+#    floor); we operate well below SNI-SLAM's Replica regime.
+# 5. tracking.iters = 10  (matches DDS-SLAM CRCD; was 8 in SNI-SLAM Replica).
+# 6. tracking.pixels = 1024  (matches DDS-SLAM CRCD Q=1024; was 2000).
+# 7. mapping.iters = 10  (REVERT from SNI-SLAM's 15 → matches DDS-SLAM CRCD).
+# 8. mapping.iters_first = 200  (REVERT from SNI-SLAM's 1000 → matches DDS-SLAM CRCD;
+#    note DDS-SLAM CRCD originally tried Recipe A iters_first=1000, demoted).
+# 9. mapping.pixels = 2048  (matches DDS-SLAM CRCD Qg=Qt=2048; was 4000).
+# 10. model.cnn.n_classes = 4  (CRCD has 4 classes: 0=bg, 1=Liver,
+#     2=Gallbladder, 3=Tool; was 52 for Replica).  Final-conv shape mismatch
+#     is silenced by strict=False in model_manager.py (already applied 3745cc2).
+# 11. model.cnn.pretrained_model_path: still 'seg/dinov2_replica.pth' — the
+#     pre-trained ViT backbone is loaded; only the final 52-channel conv is
+#     unused under use_gt_semantic=True (verified dead code path).
+# 12. func.use_gt_semantic = True  (CRCD has semantic_class ready in
+#     preprocess output; matches DDS-SLAM's edge_semantic-via-masks pipeline
+#     conceptually).
+#
+# Knobs preserved (paper-faithful, not changed):
+#   - model.hidden_dim = 32, c_dim = 16  (workflow refuted "over-parametrization"
+#     hypothesis — paper suppl 2.2 explicitly states these are paper-matched)
+#   - tracking.const_speed_assumption = True  (per user lock 2026-06-04;
+#     full F2 fix via static-frame gate deferred to code change)
+#   - rendering.{n_stratified, n_importance, perturb, learnable_beta}: inherit
+#   - mapping.keyframe_every = 4, mapping_window_size = 5
+#
+# Knobs CORRECTED 2026-06-05 (workflow w5k5n8zma audit found major issues):
+#   - planes_res / c_planes_res / s_planes_res: SCALED from Replica (10m
+#     scenes) to CRCD (0.21m bound).  Original inherited values gave ~0.9
+#     coarse cells / 3.5 fine cells per axis on CRCD — 25-46x undersampling.
+#     New values produce ~20+ cells/axis (matching Replica's effective density).
+#   - bound_dividable: 0.24 (Replica) -> 0.01 (CRCD).  Must divide bound exactly.
+#
+# Per-snippet inheritors override only: mapping.bound, data.input_folder,
+# data.output, sc_factor (written by Phase 1.6 stereo anchor calibration in
+# runbook).
+#
+# IMPORTANT: data.sc_factor is NOT a knob SNI-SLAM honours natively
+# (datasets.py uses cfg['scale'] as a global divisor).  Phase 1.6 instead
+# REGENERATES the MoGe depth PNGs at the calibrated scale, so that
+# png_depth_scale=10000 + sc_factor=1.0 produces the right metric depth on
+# load.  Workflow lens D rec.
 
 inherit_from: configs/SNI-SLAM.yaml
 dataset: 'crcd'
+scale: 1
 
-# CRCD is sub-SNR (GT motion ~0.11 mm/f << tracker noise floor): base lr_T/R 1e-3
-# overshoots the tiny motion -> the tracker drifts (METRIC-PROVEN: path-ratio 23x at
-# base 1e-3 vs 11x at 1e-4 on c1_001). The 10x-lower lr is a required CRCD change.
+meshing:
+  level_set: 0
+  resolution: 0.005    # tighter for close-up surgical scale (~25 mm scene)
+  eval_rec: True
+  mesh_bound_scale: 1.05
+
 tracking:
-  lr_T: 0.0001
-  lr_R: 0.0001
+  ignore_edge_W: 20    # CRCD rectified frames are larger; smaller edge crop
+  ignore_edge_H: 20
+  lr_T: 0.0001         # DDS-SLAM F1 fix (sub-SNR regime); 10x below paper text
+  lr_R: 0.0001         # consistent with lr_T (both rotation + translation)
+  pixels: 3000         # "correct num of rays" (06-23): Replica-density on CRCD's
+                       # larger frames (hipix finding). Was 1024 (DDS-Q match =
+                       # ~3x undersample vs Replica; deliberate throttle, now lifted).
+  iters: 10            # match DDS-SLAM CRCD tracking iter=10
+  const_speed_assumption: True   # user-locked 2026-06-04
+
+mapping:
+  every_frame: 5       # keyframe selection cadence (vs SNI-SLAM default 4)
+  pixels: 6000         # "correct num of rays" (06-23): Replica-density (hipix).
+                       # Was 2048 (DDS-Qg match = ~3x undersample vs Replica).
+  iters: 10            # REVERT from SNI-SLAM 15 → match DDS-SLAM CRCD
+  iters_first: 200     # REVERT from SNI-SLAM 1000 → match DDS-SLAM CRCD
+  keyframe_every: 5    # match DDS-SLAM keyframe_every=5 (paper k=5 StereoMIS)
+  mapping_window_size: 5
+  joint_opt_cam_lr: 0.0001   # bring in line with tracker lr_T fix
+  lr:
+    # SNI-SLAM.yaml base already sets decoders_lr/planes_lr/c_planes_lr,
+    # but fusion_lr is added only in replica.yaml — must be set here too
+    # or Mapper.py:323 KeyError on first mapping iter.  Same value as
+    # replica.yaml (semantic feature fusion lr, unrelated to pose lr).
+    fusion_lr: 3.0e-3
 
 cam:
   H: 720
@@ -40,11 +104,29 @@ cam:
   fy: 1096.6961889243337
   cx: 622.8076171875
   cy: 383.12598037719727
-  png_depth_scale: 10000      # MoGe-2 uint16 convention (base 1000)
+  png_depth_scale: 10000
   crop_edge: 0
 
-# CRCD scene scale (~0.5 m bound) — base values target ~10 m Replica scenes and
-# would 25-46x undersample CRCD. These give ~20+ cells/axis (Replica-like density).
+model:
+  c_dim: 16            # paper-matched (refuted "32→16" hypothesis; this stays)
+  truncation: 0.06     # NOTE 2026-06-05: Phase 3.7 in runbook now scales this
+                       # by sc_factor at runtime (-> ~0.01m for CRCD scenes).
+                       # The 0.06m value here is the unscaled "anchor" used
+                       # before Phase 3.7's override; if running run.py
+                       # directly without the runbook, set truncation: 0.01
+                       # manually for CRCD-scale data.
+  hidden_dim: 32       # paper-matched
+  fused_hidden_dim: 16
+  sem_hidden_dim: 256
+  cnn:
+    n_classes: 4       # CRCD: bg / Liver / Gallbladder / Tool
+    pretrained_model_path: 'seg/dinov2_replica.pth'
+
+# CRCD-scaled tri-plane resolution.  Critical fix per workflow w5k5n8zma:
+# inherited Replica values (coarse=0.24m, fine=0.06m) on CRCD's 0.21m bound
+# gave <1 coarse cell / 3.5 fine cells per axis — 25-46x undersampling.
+# These values produce ~20+ cells per axis (matching Replica's effective
+# density on its 10m scenes).
 planes_res:
   coarse: 0.04
   fine: 0.005
@@ -56,14 +138,6 @@ s_planes_res:
   coarse: 0.04
   fine: 0.003
 
-mapping:
-  lr:
-    fusion_lr: 3.0e-3          # REQUIRED: absent from root SNI-SLAM.yaml lr block
-
-model:
-  cnn:
-    n_classes: 4               # CRCD: bg / Liver / Gallbladder / Tool (base 52)
-
 func:
-  use_gt_semantic: True        # baseline uses CRCD GT masks (base Replica head can't
-                               # predict CRCD classes); B run flips to predicted DINOv3 seg
+  use_gt_semantic: True
+  use_gt_pose: False

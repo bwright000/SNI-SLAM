@@ -59,7 +59,7 @@ class Renderer(object):
         return lower + (upper - lower) * t_rand
 
     def render_batch_ray(self, all_planes, decoders, rays_d, rays_o, device, truncation, gt_depth=None,
-                        sem_feats=None, rgb_feats=None, return_emb=False, normalize=False):
+                        sem_feats=None, rgb_feats=None, return_emb=False):
         n_stratified = self.n_stratified
         n_importance = self.n_importance
         n_rays = rays_o.shape[0]
@@ -135,11 +135,6 @@ class Renderer(object):
         alpha = self.sdf2alpha(raw[..., 3], decoders.beta)
         weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=device)
                                                 ,(1. - alpha + 1e-10)], -1), -1)[:, :-1]
-        if normalize:
-            # DDS-style (model/scene_rep.py:110): renormalize per-ray weights to sum=1 so empty/
-            # low-density rays render a COLOUR (acc=1) instead of pure black -> kills the dark blobs
-            # in eval renders. Render-path only (mapping calls use normalize=False -> training unchanged).
-            weights = weights / (weights.sum(-1, keepdim=True) + 1e-8)
 
         rendered_rgb = torch.sum(weights[..., None] * raw[..., :3], -2)
         rendered_depth = torch.sum(weights * z_vals, -1)
@@ -194,11 +189,11 @@ class Renderer(object):
                 rays_o_batch = rays_o[i:i+ray_batch_size]
                 if gt_depth is None:
                     ret = self.render_batch_ray(all_planes, decoders, rays_d_batch, rays_o_batch,
-                                                device, truncation, gt_depth=None, normalize=True)
+                                                device, truncation, gt_depth=None)
                 else:
                     gt_depth_batch = gt_depth[i:i+ray_batch_size]
                     ret = self.render_batch_ray(all_planes, decoders, rays_d_batch, rays_o_batch,
-                                                device, truncation, gt_depth=gt_depth_batch, normalize=True)
+                                                device, truncation, gt_depth=gt_depth_batch)
 
                 depth, color, _, _, _, _, semantic = ret
                 depth_list.append(depth.double())

@@ -140,8 +140,12 @@ for ROW in "${SNIPPETS[@]}"; do
 
   RAW=/content/crcd_raw/${NAME}
   STAGED=/content/sni-slam/data/CRCD/${NAME}
-  OUTPUT=/content/sni-slam/output/CRCD/${KEY}/test
-  DRIVE_DST=$DRIVE_ROOT/$KEY
+  # seg variant for the DINOv3 A/B: gt (baseline GT masks) | dino (predicted DINOv3 seg, run B).
+  # TAG keys OUTPUT + DRIVE_DST so baseline and B don't collide (staging is shared by NAME).
+  SEG=${SEG:-gt}
+  TAG="$KEY"; [ "$SEG" != gt ] && TAG="${KEY}_${SEG}"
+  OUTPUT=/content/sni-slam/output/CRCD/${TAG}/test
+  DRIVE_DST=$DRIVE_ROOT/$TAG
   mkdir -p "$DRIVE_DST"
 
   if done_marker "$DRIVE_DST"; then
@@ -222,6 +226,59 @@ with open('$STAGED/rectified_calib.txt', 'w') as f:
     f.write(f"cy {cam['cy']}\n")
     f.write(f"baseline_m {stereo['baseline_m']}\n")
 PYEOF
+  fi
+
+  # --------------------------------------------------------------------------
+  # PHASE 2.8 -- seg variant: gt (baseline GT masks) | dino (predicted DINOv3 seg).
+  # The staging's semantic_class/ is SHARED across variants (keyed by NAME), so we
+  # snapshot GT once (semantic_class_gt/) and swap in place. SNI reads
+  # semantic_class/ via use_gt_semantic=True either way -> NO SNI code change.
+  # DINOv3 can't run in the sni torch1.11 env -> bake offline (system python torch2).
+  # --------------------------------------------------------------------------
+  phase "2.8.$KEY" "seg variant = $SEG"
+  GT_BAK="$STAGED/semantic_class_gt"
+  CUR_VAR=$(cat "$STAGED/.seg_variant" 2>/dev/null || echo gt)
+  if [ ! -d "$GT_BAK" ]; then
+    if [ "$CUR_VAR" = gt ]; then cp -r "$STAGED/semantic_class" "$GT_BAK" && echo "  snapshotted GT seg -> semantic_class_gt"
+    else echo "  WARN: no GT backup and current variant=$CUR_VAR -> cannot restore GT"; fi
+  fi
+  if [ "$SEG" = dino ]; then
+    DDS_REPO=${DDS_REPO:-/content/DDS-SLAM}
+    # robust to a pre-existing /content/DDS-SLAM (the paired DDS batch uses it for sc_factor):
+    # update if it's a git checkout, clone only into a fresh path, then assert the bake exists.
+    if [ -d "$DDS_REPO/.git" ]; then
+      echo "  updating existing DDS-SLAM checkout (diagnosis-live)"
+      ( cd "$DDS_REPO" && git fetch origin diagnosis-live && git checkout diagnosis-live && git pull --ff-only origin diagnosis-live ) \
+        || echo "  WARN: DDS-SLAM update failed; using existing checkout"
+    elif [ ! -e "$DDS_REPO" ]; then
+      echo "  cloning DDS-SLAM (bake script + training model)"
+      git clone --depth 1 -b diagnosis-live https://github.com/bwright000/DDS-SLAM.git "$DDS_REPO" \
+        || { echo "FATAL: DDS-SLAM clone failed"; exit 6; }
+    else
+      echo "  WARN: $DDS_REPO exists but is not a git repo"
+    fi
+    [ -f "$DDS_REPO/Addons/seg/bake_dinov3_seg.py" ] || { echo "FATAL: bake script missing at $DDS_REPO/Addons/seg/bake_dinov3_seg.py (push it to diagnosis-live)"; exit 6; }
+    "$SYSPY" -c 'import cv2, torch' 2>/dev/null || { echo "FATAL: system python ($SYSPY) lacks cv2/torch2 — the bake needs them"; exit 6; }
+    "$SYSPY" -c 'import transformers' 2>/dev/null || { echo "  installing transformers (system python torch2)"; "$SYSPY" -m pip install -q -U transformers; }
+    HEAD_PTH=${HEAD_PTH:-/content/drive/MyDrive/Datasets/seg/loso_dinov3_b2/dinov2_crcd_${NAME}_SWEEPONLY.pth}
+    BASE_DINOV3=${BASE_DINOV3:-/content/drive/MyDrive/Datasets/DiNO}
+    [ -e "$HEAD_PTH" ]    || { echo "FATAL: LOSO head missing: HEAD_PTH=$HEAD_PTH (must be the leave-${NAME}-out fold)"; exit 6; }
+    [ -e "$BASE_DINOV3" ] || { echo "FATAL: base DINOv3 missing: BASE_DINOV3=$BASE_DINOV3"; exit 6; }
+    [ -f "$CALIB_NPZ" ]   || { echo "FATAL: rectify maps missing: CALIB_NPZ=$CALIB_NPZ (Phase 0 should have written it)"; exit 6; }
+    # mark dino BEFORE the bake: a mid-bake crash then leaves semantic_class/ flagged 'dino',
+    # so a later gt run restores from semantic_class_gt instead of consuming a gt/dino mix.
+    echo dino > "$STAGED/.seg_variant"
+    echo "  baking DINOv3 seg ($NAME held-out head, RAW->predict->rectify) -> semantic_class/"
+    "$SYSPY" "$DDS_REPO/Addons/seg/bake_dinov3_seg.py" \
+      --raw_rgb_dir "$RAW/rgb" --out_seg "$STAGED/semantic_class" --calib_npz "$CALIB_NPZ" \
+      --base_dinov3 "$BASE_DINOV3" --head_pth "$HEAD_PTH" \
+      --img_h 504 --img_w 896 --expect_n "$FRAMES" \
+      || { echo "FATAL: DINOv3 seg bake failed"; exit 6; }
+  else
+    if [ "$CUR_VAR" = dino ] && [ -d "$GT_BAK" ]; then
+      rm -rf "$STAGED/semantic_class" && cp -r "$GT_BAK" "$STAGED/semantic_class" && echo "  restored GT seg from semantic_class_gt"
+    fi
+    echo gt > "$STAGED/.seg_variant"
   fi
 
   # --------------------------------------------------------------------------
@@ -407,6 +464,9 @@ override = {
     'model': {
         'truncation': trunc_new,
     },
+    # TAG-keyed output so seg-variant A/B runs don't collide; full data block
+    # (both keys) so it's robust whether the loader merges or replaces 'data'.
+    'data': {'input_folder': orig['data']['input_folder'], 'output': '$OUTPUT'},
 }
 # GTPOSE=1 diagnostic: map AND render from GT poses (use_gt_pose makes
 # estimate_c2w == gt) -> isolates SNI's render ceiling from the tracker drift.
@@ -486,11 +546,12 @@ PYEOF
   # PHASE 6 -- eval: extended trajectory metrics + render PSNR/SSIM/LPIPS + Depth L1
   # --------------------------------------------------------------------------
   phase "6.$KEY" "eval (extended ATE + render + Depth L1)"
+  cd "$REPO_ROOT"   # eval/render use relative paths; Phase 5's cd is skipped on a ckpt-resume
 
   # Extended trajectory metrics (Sim3 + est_path/GT_path + per-axis Pearson)
   python src/tools/eval_traj_extended.py "$CONFIG" \
     --csv "$DRIVE_ROOT/_traj_summary.csv" \
-    --name "$KEY" 2>&1 | tee "$DRIVE_DST/extended_metrics.txt" || true
+    --name "$TAG" 2>&1 | tee "$DRIVE_DST/extended_metrics.txt" || true
 
   # Post-hoc per-frame render (DDS-SLAM parity).
   # SNI-SLAM's Frame_Visualizer (src/utils/Frame_Visualizer.py:55) saves only
@@ -513,7 +574,7 @@ PYEOF
     python Addons/eval/eval_rendering.py \
       --gt_dir "$STAGED/rgb" \
       --render_dir "$OUTPUT/rendered" \
-      --name "$KEY" \
+      --name "$TAG" \
       --output_csv "$DRIVE_DST/render_eval.csv" \
       --summary_csv "$DRIVE_ROOT/_render_summary.csv" \
       --sequence "CRCD (${NAME})" 2>&1 | tee "$DRIVE_DST/render_eval.txt" || \

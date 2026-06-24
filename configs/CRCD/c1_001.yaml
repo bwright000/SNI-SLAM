@@ -6,8 +6,13 @@
 inherit_from: configs/CRCD/crcd_sni_base.yaml
 
 mapping:
-  bound: [[-0.08,0.13],[-0.02,0.18],[0.68,0.90]]
-  marching_cubes_bound: [[-0.08,0.13],[-0.02,0.18],[0.68,0.90]]
+  # bound WIDENED to the GT-pose-derived extent (preprocess derive_bound, pose +/- 0.25 m).
+  # The old static [...,[0.68,0.90]] was camera-centred + ~0.12 m tight, so it CLIPPED the tissue
+  # surface: camera z ~0.78 m minus MoGe depth ~0.10-0.20 m -> surface ~0.58-0.68 m, at/below the
+  # 0.68 floor -> the SDF forms no surface there -> the dark blobs. This extent contains pose +/-
+  # depth for either OpenGL sign and is the deep-dive fix #2 (with the render-weight normalize, #1).
+  bound: [[-0.23,0.28],[-0.17,0.34],[0.53,1.05]]
+  marching_cubes_bound: [[-0.23,0.28],[-0.17,0.34],[0.53,1.05]]
 
 data:
   input_folder: data/CRCD/C1_001/

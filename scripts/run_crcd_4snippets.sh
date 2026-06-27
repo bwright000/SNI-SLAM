@@ -276,6 +276,15 @@ PYEOF
       --base_dinov3 "$BASE_DINOV3" --head_pth "$HEAD_PTH" \
       --img_h 504 --img_w 896 --expect_n "$FRAMES" \
       || { echo "FATAL: DINOv3 seg bake failed"; exit 6; }
+  elif [ "$SEG" = dinov2 ]; then
+    # LIVE DINOv2 predicted seg: SNI's DINO2SEG loads our per-snippet CRCD head and predicts the seg
+    # live (use_gt_semantic=False, injected in Phase 3.7). DINOv2/14 runs NATIVE in the sni torch1.11
+    # env -> NO offline bake. semantic_class/ is unused under use_gt_semantic=False (left as-is).
+    CRCD_HEAD_PTH=${CRCD_HEAD_PTH:-/content/drive/MyDrive/Datasets/seg/CRCD_DINOv2_heads/dinov2_crcd_${NAME}.pth}
+    [ -e "$CRCD_HEAD_PTH" ] || { echo "FATAL: CRCD DINOv2 LOSO head missing: $CRCD_HEAD_PTH (leave-${NAME}-out fold; train via train_seg_head_crcd_loso_20260619.sh BACKBONE=dinov2)"; exit 6; }
+    export CRCD_HEAD_PTH
+    echo dinov2 > "$STAGED/.seg_variant"
+    echo "  LIVE DINOv2 predicted seg: head=$CRCD_HEAD_PTH (use_gt_semantic=False, native torch1.11, no bake)"
   else
     if [ "$CUR_VAR" = dino ] && [ -d "$GT_BAK" ]; then
       rm -rf "$STAGED/semantic_class" && cp -r "$GT_BAK" "$STAGED/semantic_class" && echo "  restored GT seg from semantic_class_gt"
@@ -483,6 +492,14 @@ if os.environ.get('QUALITY') == '1':
     override['c_planes_res'] = {'fine': 0.002}
     override['s_planes_res'] = {'fine': 0.002}
     print('  QUALITY=1: n_importance 24 | mapping.pixels 8000 window 10 iters 25/1500 | planes_res fine 0.003/0.002')
+# SEG=dinov2: live predicted seg from our per-snippet CRCD DINOv2 head (use_gt_semantic=False).
+# gt/dino keep use_gt_semantic=True (GT masks / baked DINOv3 pngs). load_config merges recursively so
+# model.cnn.{n_classes,dim} from crcd_sni_base survive alongside the injected pretrained_model_path.
+_seg = '$SEG'
+override.setdefault('func', {})['use_gt_semantic'] = (_seg != 'dinov2')
+if _seg == 'dinov2':
+    override.setdefault('model', {}).setdefault('cnn', {})['pretrained_model_path'] = '$CRCD_HEAD_PTH'
+    print('  SEG=dinov2: use_gt_semantic=False + cnn.pretrained_model_path=$CRCD_HEAD_PTH (live predicted seg)')
 with open('$STAGED/scaled_config.yaml', 'w') as f:
     yaml.safe_dump(override, f, default_flow_style=None, sort_keys=False)
 print(f'  truncation: {trunc_old:.4f} -> {trunc_new:.5f} (× sc_factor {SC:.4f})')
